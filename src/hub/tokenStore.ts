@@ -26,6 +26,7 @@ export class TokenStore {
   }
 
   private load(): void {
+    this.tokens.clear();
     try {
       const raw = readFileSync(this.path, "utf8");
       const list = JSON.parse(raw) as IssuedToken[];
@@ -62,7 +63,14 @@ export class TokenStore {
     return removed;
   }
 
+  /**
+   * Re-reads the store from disk before checking — `token issue`/`revoke`
+   * typically run as a separate CLI invocation while the server keeps
+   * running, so an in-memory-only check would require a server restart to
+   * see newly issued or revoked tokens.
+   */
   validate(token: string): IssuedToken | undefined {
+    this.load();
     return this.tokens.get(token);
   }
 
