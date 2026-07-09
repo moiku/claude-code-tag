@@ -17,4 +17,6 @@ export interface Notifier {
   postReply(channel: string, threadTs: string, text: string): Promise<void>;
   /** Posts a message that will be updated in place (status line, or a prompt with buttons). */
   postMessage(channel: string, threadTs: string, text: string, blocks?: unknown[]): Promise<MessageHandle>;
+  /** Best-effort permalink lookup, used for the "already paired elsewhere" hint. */
+  getPermalink?(channel: string, ts: string): Promise<string | null>;
 }

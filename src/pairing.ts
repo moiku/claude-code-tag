@@ -14,8 +14,18 @@ export interface Pairing {
 
 const DEFAULT_STORE_PATH = join(homedir(), ".cctag", "pairings.json");
 
+export type PairingChange = { action: "add" | "remove"; pairing: Pairing };
+
 export class PairingStore {
   private pairings = new Map<string, Pairing>();
+
+  /**
+   * Optional hook for Hub–Spoke mode: the Spoke uses this to tell the Hub
+   * which thread it now owns (or no longer owns), so the Hub can route
+   * future events for that thread to the right Spoke connection without
+   * needing its own copy of pairing state.
+   */
+  onChange?: (change: PairingChange) => void;
 
   constructor(private readonly path: string = DEFAULT_STORE_PATH) {
     this.load();
@@ -65,11 +75,14 @@ export class PairingStore {
   add(p: Pairing): void {
     this.pairings.set(p.key, p);
     this.save();
+    this.onChange?.({ action: "add", pairing: p });
   }
 
   remove(key: string): boolean {
+    const existing = this.pairings.get(key);
     const existed = this.pairings.delete(key);
     if (existed) this.save();
+    if (existed && existing) this.onChange?.({ action: "remove", pairing: existing });
     return existed;
   }
 

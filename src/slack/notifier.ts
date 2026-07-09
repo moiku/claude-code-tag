@@ -26,4 +26,9 @@ export class SlackNotifier implements Notifier {
       },
     };
   }
+
+  async getPermalink(channel: string, ts: string): Promise<string | null> {
+    const res = await this.client.chat.getPermalink({ channel, message_ts: ts }).catch(() => null);
+    return res?.permalink ?? null;
+  }
 }
