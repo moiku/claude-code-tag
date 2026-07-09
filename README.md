@@ -111,11 +111,78 @@ share them. Two ways to have more than one person use cctag:
 
 - **Simplest**: each person creates their own Slack app (their own `@cctag-
   yourname` bot) from `manifest.yaml` and runs their own daemon against their
-  own machine. Zero code changes.
-- **Shared bot, Hub–Spoke**: run a single always-on "Hub" process (holding
-  the one Socket Mode connection) that routes to each person's "Spoke"
-  daemon over an authenticated WebSocket. Planned for a future release — see
-  the project's design notes.
+  own machine. Zero code changes — this is standalone mode (`npm run dev`).
+- **Shared bot, Hub–Spoke**: one always-on **Hub** holds the single Socket
+  Mode connection and a small always-on server; everyone else runs a
+  **Spoke** on their own machine, which connects out to the Hub over an
+  authenticated WebSocket (`wss://`) and drives their local herdr/Claude
+  Code instances exactly like standalone mode does. The Hub doesn't run or
+  see anyone's Claude Code session — it only routes Slack events to the
+  right Spoke and relays messages back.
+
+### Running a Hub
+
+The Hub needs the same `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` as standalone
+mode, plus a public `wss://` endpoint (a domain + TLS in front of it —
+[Caddy](https://caddyserver.com) gets you automatic HTTPS with almost no
+config). A single Oracle Cloud "Always Free" `VM.Standard.E2.1.Micro`
+instance is plenty.
+
+```bash
+git clone https://github.com/moiku/claude-code-tag.git /opt/cctag
+cd /opt/cctag && npm install && npm run build
+cat > .env <<EOF
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+CCTAG_HUB_PORT=8765
+EOF
+```
+
+Point a domain at the box (an A record, DNS-only / not proxied through
+Cloudflare or similar — Caddy needs to complete its own ACME/TLS handshake)
+and give Caddy a one-line `/etc/caddy/Caddyfile`:
+
+```
+your.domain.example {
+	reverse_proxy localhost:8765
+}
+```
+
+Run the Hub under systemd (`ExecStart=/usr/bin/node dist/hub/index.js`,
+`EnvironmentFile=/opt/cctag/.env`) so it survives reboots — see
+`assets/cctag-hub.service` for a template unit file — then `systemctl
+enable --now caddy cctag-hub`.
+
+Issue each person a token from the Hub (this is the auth boundary — anyone
+holding a token can register as any owner, so only hand these to people you
+trust):
+
+```bash
+node dist/hub/index.js token issue <name>   # prints a token
+node dist/hub/index.js token list
+node dist/hub/index.js token revoke <name>
+```
+
+### Running a Spoke
+
+Same `.env` as standalone mode (`CCTAG_OWNER_USER_ID`, `CCTAG_HERDR_BIN`,
+etc.) but with the Slack tokens replaced by the Hub connection:
+
+```bash
+CCTAG_HUB_URL=wss://your.domain.example
+CCTAG_SPOKE_TOKEN=<token from `token issue`>
+```
+
+```bash
+npm run build
+npm run start:spoke   # or dev:spoke while iterating
+```
+
+The Spoke reconnects automatically (with backoff) if the connection drops.
+Pairing state still lives locally on the Spoke's machine
+(`~/.cctag/pairings.json`) — the Hub only keeps a lightweight, in-memory
+"which thread belongs to which Spoke" map, rebuilt from what each Spoke
+reports on connect.
 
 ## Security notes
 

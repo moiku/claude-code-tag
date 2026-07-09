@@ -1,0 +1,16 @@
+[Unit]
+Description=cctag Hub (Slack Socket Mode + WebSocket router)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/cctag
+ExecStart=/usr/bin/node dist/hub/index.js
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/opt/cctag/.env
+
+[Install]
+WantedBy=multi-user.target
