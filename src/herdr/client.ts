@@ -1,0 +1,131 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { AgentInfo, AgentStatus } from "./types.js";
+import { HerdrError } from "./types.js";
+
+const execFileAsync = promisify(execFile);
+
+interface RawAgent {
+  agent: string;
+  agent_session?: { kind: string; value: string };
+  agent_status: string;
+  cwd: string;
+  name?: string;
+  pane_id: string;
+  terminal_id: string;
+  workspace_id: string;
+}
+
+const KNOWN_STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "done", "unknown"]);
+
+function normalizeStatus(raw: string): AgentStatus {
+  return KNOWN_STATUSES.has(raw as AgentStatus) ? (raw as AgentStatus) : "unknown";
+}
+
+function normalizeAgent(raw: RawAgent): AgentInfo {
+  return {
+    agent: raw.agent,
+    sessionId: raw.agent_session?.kind === "id" ? raw.agent_session.value : null,
+    agentStatus: normalizeStatus(raw.agent_status),
+    cwd: raw.cwd,
+    name: raw.name,
+    paneId: raw.pane_id,
+    terminalId: raw.terminal_id,
+    workspaceId: raw.workspace_id,
+  };
+}
+
+export class HerdrClient {
+  constructor(private readonly bin: string) {}
+
+  private async run(args: string[]): Promise<unknown> {
+    let stdout: string;
+    try {
+      const result = await execFileAsync(this.bin, args, { timeout: 15_000 });
+      stdout = result.stdout;
+    } catch (err) {
+      const e = err as { message?: string; stderr?: string };
+      throw new HerdrError(e.message ?? "herdr command failed", args, e.stderr);
+    }
+    try {
+      return JSON.parse(stdout);
+    } catch {
+      throw new HerdrError(`herdr returned non-JSON output: ${stdout.slice(0, 200)}`, args);
+    }
+  }
+
+  /** Raw text output; used for pane read, which is NOT JSON. */
+  private async runRaw(args: string[]): Promise<string> {
+    try {
+      const result = await execFileAsync(this.bin, args, { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+      return result.stdout;
+    } catch (err) {
+      const e = err as { message?: string; stderr?: string };
+      throw new HerdrError(e.message ?? "herdr command failed", args, e.stderr);
+    }
+  }
+
+  async agentList(): Promise<AgentInfo[]> {
+    const json = (await this.run(["agent", "list"])) as { result?: { agents?: RawAgent[] } };
+    const agents = json.result?.agents ?? [];
+    return agents.map(normalizeAgent);
+  }
+
+  async agentGet(target: string): Promise<AgentInfo | null> {
+    try {
+      const json = (await this.run(["agent", "get", target])) as { result?: { agent?: RawAgent } };
+      const agent = json.result?.agent;
+      return agent ? normalizeAgent(agent) : null;
+    } catch (err) {
+      if (err instanceof HerdrError && /not found|no such|unknown target/i.test(err.stderr ?? err.message)) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  /** Sends literal text into the target's input box. Does NOT submit — call paneSendKeys(..., "Enter") separately. */
+  async agentSend(target: string, text: string): Promise<void> {
+    await this.run(["agent", "send", target, text]);
+  }
+
+  /** `pane send-keys` prints nothing on success (unlike other subcommands) — don't JSON-parse it. */
+  async paneSendKeys(paneId: string, ...keys: string[]): Promise<void> {
+    await this.runRaw(["pane", "send-keys", paneId, ...keys]);
+  }
+
+  async paneRead(
+    paneId: string,
+    opts: { source?: "visible" | "recent" | "recent-unwrapped"; lines?: number } = {},
+  ): Promise<string> {
+    const args = ["pane", "read", paneId];
+    if (opts.source) args.push("--source", opts.source);
+    if (opts.lines) args.push("--lines", String(opts.lines));
+    return this.runRaw(args);
+  }
+
+  /** `pane run` prints nothing on success — don't JSON-parse it. */
+  async paneRun(paneId: string, command: string): Promise<void> {
+    await this.runRaw(["pane", "run", paneId, command]);
+  }
+
+  async paneClose(paneId: string): Promise<void> {
+    await this.run(["pane", "close", paneId]);
+  }
+
+  async agentStart(name: string, cwd: string, argv: string[]): Promise<AgentInfo> {
+    const json = (await this.run([
+      "agent",
+      "start",
+      name,
+      "--cwd",
+      cwd,
+      "--no-focus",
+      "--",
+      ...argv,
+    ])) as { result?: { agent?: RawAgent } };
+    const agent = json.result?.agent;
+    if (!agent) throw new HerdrError("agent start returned no agent", ["agent", "start", name]);
+    return normalizeAgent(agent);
+  }
+}
