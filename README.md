@@ -1,5 +1,7 @@
 # cctag
 
+<img src="assets/icon.png" alt="cctag icon" width="120" />
+
 Bridge a Slack thread to a **locally running Claude Code TUI session**, the
 way [Claude Tag](https://www.anthropic.com/news/introducing-claude-tag) bridges
 Slack to a cloud session — except cctag drives *your own terminal*.
@@ -53,11 +55,13 @@ terminal screen via `herdr pane read`, not from the transcript. See
    `connections:write` scope. This is `SLACK_APP_TOKEN` (`xapp-...`).
 3. **Install the app** to your workspace. Under **OAuth & Permissions**,
    copy the **Bot User OAuth Token** — this is `SLACK_BOT_TOKEN` (`xoxb-...`).
-4. Invite the bot to a channel: `/invite @cctag`.
-5. Find your own Slack user ID (three-dot menu on your profile → *Copy
+4. (Optional) Under **Basic Information → Display Information**, upload
+   `assets/icon-512.png` as the app icon.
+5. Invite the bot to a channel: `/invite @cctag`.
+6. Find your own Slack user ID (three-dot menu on your profile → *Copy
    member ID*) — this is `CCTAG_OWNER_USER_ID`. Only this user can run
    `connect`/`disconnect`.
-6. Copy `.env.example` to `.env` and fill in the four values above.
+7. Copy `.env.example` to `.env` and fill in the four values above.
 
 ```bash
 cp .env.example .env
