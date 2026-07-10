@@ -1,4 +1,8 @@
-🌐 このドキュメントは cctag の内部の仕組みを説明するものです（セットアップ手順は [README](../README.md) 参照）。
+🌐 **日本語** | [English](how-it-works.en.md)
+
+---
+
+このドキュメントは cctag の内部の仕組みを説明するものです（セットアップ手順は [README](../README.md) 参照）。
 
 # cctagの仕組み
 
