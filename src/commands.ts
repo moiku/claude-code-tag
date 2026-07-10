@@ -3,6 +3,11 @@ import { PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
 import { agentPickerBlocks } from "./slack/blocks.js";
+import { parsePermissionMenu } from "./prompts.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const HELP_TEXT = [
   "*cctag の使い方*",
@@ -10,8 +15,42 @@ const HELP_TEXT = [
   "• `@cctag disconnect` — 接続を解除（オーナーのみ）",
   "• `@cctag status` — 接続状態を表示",
   "• `@cctag list` — 稼働中のインスタンス一覧",
+  "• `@cctag model <name>` — Claude Code のモデルを切り替え（例: `model opus`）",
+  "• `@cctag plan` — Plan Mode を有効化",
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
 ].join("\n");
+
+const MODEL_COMMAND_RE = /^model\s+(\S+)$/i;
+
+/**
+ * The TUI always ends with a fixed ~7-line footer (a separator, an empty
+ * prompt, another separator, then model/context/cwd/mode status lines) plus
+ * a variable amount of blank padding above it. A small `--lines N` read off
+ * the bottom lands entirely inside that footer, missing the actual command
+ * output higher up — so read a larger chunk and strip the footer/padding
+ * off the end instead of trusting a short tail read.
+ */
+function stripFooterChrome(raw: string): string {
+  const lines = raw.split("\n");
+  // The model/context status line ("Sonnet 5 │ ctx ▒▒▒ ... /rc") is a
+  // distinctive marker for the start of the fixed ~4-line footer (it's
+  // always followed by a usage-window line, the cwd basename, and a mode
+  // line — none of which are reliably pattern-matchable on their own, e.g.
+  // the cwd line is arbitrary text). Find its last occurrence and cut
+  // everything from there to the end in one shot, then also drop the
+  // separator/empty-prompt/separator directly above it and any blank
+  // padding above that.
+  let end = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/ctx\s.*\/rc/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  while (end > 0 && (/^[─\s]*$/.test(lines[end - 1]) || /^❯\s*$/.test(lines[end - 1].trim()))) end--;
+  while (end > 0 && !lines[end - 1].trim()) end--;
+  return lines.slice(0, end).join("\n").trim();
+}
 
 export interface MentionContext {
   channel: string;
@@ -77,7 +116,35 @@ export class CommandHandler {
     // using the FULL text, not a split fragment of it.
     const singleWordCmd = /^\S+$/.test(text) ? text.toLowerCase() : undefined;
 
+    const modelMatch = MODEL_COMMAND_RE.exec(text);
+    if (modelMatch) {
+      const pairing = this.pairingStore.get(channel, threadTs);
+      if (!pairing) {
+        await this.notifier.postReply(
+          channel,
+          threadTs,
+          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+        );
+        return;
+      }
+      await this.runTuiCommand(channel, threadTs, pairing.terminalId, `/model ${modelMatch[1]}`);
+      return;
+    }
+
     switch (singleWordCmd) {
+      case "plan": {
+        const pairing = this.pairingStore.get(channel, threadTs);
+        if (!pairing) {
+          await this.notifier.postReply(
+            channel,
+            threadTs,
+            "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+          );
+          return;
+        }
+        await this.runTuiCommand(channel, threadTs, pairing.terminalId, "/plan");
+        return;
+      }
       case "connect": {
         if (!this.isOwner(userId)) {
           await this.notifier.postReply(channel, threadTs, "⚠️ `connect` はオーナーのみ実行できます。");
@@ -163,6 +230,58 @@ export class CommandHandler {
         return;
       }
       await this.notifier.postReply(channel, threadTs, `❌ エラー: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Runs a CLI slash command (`/model <name>`, `/plan`, ...) rather than a
+   * normal conversational turn. These don't reliably show up in the session
+   * transcript the way an LLM reply does, so — unlike startTurn() — this
+   * reads the result straight off the pane instead. If a confirmation menu
+   * appears (e.g. switching models mid-conversation asks "Switch model?
+   * Yes/No"), it's auto-confirmed with the first option, since the user
+   * asking for the command already expressed that intent.
+   */
+  private async runTuiCommand(channel: string, threadTs: string, terminalId: string, command: string): Promise<void> {
+    if (this.turnEngine.isBusy(terminalId)) {
+      await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+      return;
+    }
+    const agent = await this.herdr.agentGet(terminalId);
+    if (!agent) {
+      await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+      return;
+    }
+
+    this.turnEngine.markBusy(terminalId);
+    try {
+      await this.herdr.agentSend(terminalId, command);
+      await sleep(300);
+      await this.herdr.paneSendKeys(agent.paneId, "Enter");
+
+      let settled = false;
+      for (let i = 0; i < 10 && !settled; i++) {
+        await sleep(600);
+        const cur = await this.herdr.agentGet(terminalId);
+        if (!cur) break;
+        if (cur.agentStatus === "blocked") {
+          const paneText = await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 40 });
+          const menu = parsePermissionMenu(paneText);
+          if (menu && menu.choices.length > 0) {
+            await this.herdr.agentSend(terminalId, menu.choices[0].num);
+          }
+          continue;
+        }
+        if (cur.agentStatus === "idle" || cur.agentStatus === "done") {
+          settled = true;
+        }
+      }
+
+      const raw = await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 40 });
+      const snippet = stripFooterChrome(raw);
+      await this.notifier.postReply(channel, threadTs, "```\n" + snippet.slice(-1500) + "\n```");
+    } finally {
+      this.turnEngine.clearBusy(terminalId);
     }
   }
 

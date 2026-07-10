@@ -50,6 +50,11 @@ export type AnswerResult = { ok: true } | { ok: false; reason: "not-pending" };
 
 export class TurnEngine {
   private turns = new Map<string, TurnState>();
+  // Terminals busy for a reason other than an active turn (e.g. commands.ts
+  // running a /model or /plan TUI command) — kept separate from `turns` so
+  // isBusy() covers both, and the BackgroundWatcher doesn't try to watch the
+  // same instance a non-turn command is currently driving.
+  private externallyBusy = new Set<string>();
 
   constructor(
     private readonly herdr: HerdrClient,
@@ -58,7 +63,15 @@ export class TurnEngine {
   ) {}
 
   isBusy(terminalId: string): boolean {
-    return this.turns.has(terminalId);
+    return this.turns.has(terminalId) || this.externallyBusy.has(terminalId);
+  }
+
+  markBusy(terminalId: string): void {
+    this.externallyBusy.add(terminalId);
+  }
+
+  clearBusy(terminalId: string): void {
+    this.externallyBusy.delete(terminalId);
   }
 
   async abortTurn(terminalId: string): Promise<void> {
