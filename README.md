@@ -89,6 +89,7 @@ bot:
 | `@cctag list` | anyone | Lists all running agents and which are paired |
 | `@cctag model <name>` | anyone (in a paired thread) | Runs `/model <name>` in the paired session (e.g. `model opus`, `model sonnet`) |
 | `@cctag plan` | anyone (in a paired thread) | Runs `/plan` in the paired session, enabling Plan Mode |
+| `@cctag log [instruction]` | anyone (in a paired thread) | Feeds thread messages since cctag's last post (not just @cctag mentions) into the paired session, optionally with an instruction |
 | `@cctag <anything else>` | anyone (in a paired thread) | Sends the text into the paired Claude Code session; its reply is posted back in the thread |
 
 Only one thread can be paired to a given terminal at a time. Only single-word
@@ -118,6 +119,20 @@ confirmation menu ("Switch model? Yes/No"), it's auto-confirmed, since
 asking for the switch already expressed that intent. These commands are
 blocked while a normal turn (or another TUI command) is in progress on the
 same instance.
+
+### Catching up on thread activity cctag wasn't mentioned in
+
+cctag only ever sees the literal text of messages that mention it — a
+review posted by another Slack bot or a teammate elsewhere in the thread is
+otherwise invisible to it. `@cctag log` closes that gap: it fetches every
+message posted after cctag's own last message in the thread (found by
+looking up the thread's actual history, not by guessing from wording),
+formats each as `sender: text` (resolving human display names and bot
+names), and feeds the result into the paired session as context. With no
+instruction, it defaults to "act on whatever the log contains"; with one
+(`@cctag log <instruction>`), that instruction is appended instead. If
+nothing's been posted since cctag's last message, it says so instead of
+starting a no-op turn.
 
 ### Work started outside of Slack
 

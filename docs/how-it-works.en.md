@@ -187,6 +187,34 @@ tracking, so these TUI commands are treated as "busy" the same way an
 active turn is — this keeps the background watcher (section 5.5) from
 trying to watch the same instance a TUI command is currently driving.
 
+## 5.7 Catching up on messages cctag wasn't mentioned in
+
+cctag normally only ever sees the literal text of a message that mentions
+it. A review posted by another Slack bot (like `@Claude`) or a teammate
+elsewhere in the same thread is otherwise invisible to it unless someone
+manually copies it into an `@cctag` message.
+
+`@cctag log [instruction]` closes that gap. Rather than guessing intent
+from wording, it looks up the thread's actual history via Slack's
+`conversations.replies` API, mechanically finds **cctag's own last
+message** in that thread, and takes everything posted after it. Each
+message is formatted as `sender: text` (human display names resolved via
+`users.info`, bot names via `bot_profile.name`/`username`), then fed into
+the paired session as one turn — reusing `startTurn()` unchanged, so any
+permission prompt or AskUserQuestion that comes up mid-turn is handled by
+the same existing machinery. With no instruction, it defaults to "act on
+whatever the log contains"; with one, that instruction is appended
+instead. If nothing's been posted since cctag's last message, it says so
+rather than starting a no-op turn.
+
+`Notifier` gains an optional `getThreadHistorySinceLastBotPost?`, mirroring
+`getPermalink?`'s design: `SlackNotifier` implements it directly for
+standalone mode, while Hub–Spoke mode proxies it through a `get_thread_history`
+RPC call the Hub executes (since the Hub is the side holding the real Slack
+client there). The actual formatting logic
+(`formatThreadHistorySinceLastBotPost`) lives once in `slack/notifier.ts`
+and is shared by both paths.
+
 ## 6. Connecting one PC to more than one Slack workspace
 
 A Hub is tied to exactly one workspace (by its Slack app token). To reach a
