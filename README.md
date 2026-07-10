@@ -87,6 +87,8 @@ bot:
 | `@cctag disconnect` | owner | Unpairs this thread |
 | `@cctag status` | anyone | Shows the paired instance and its live status |
 | `@cctag list` | anyone | Lists all running agents and which are paired |
+| `@cctag model <name>` | anyone (in a paired thread) | Runs `/model <name>` in the paired session (e.g. `model opus`, `model sonnet`) |
+| `@cctag plan` | anyone (in a paired thread) | Runs `/plan` in the paired session, enabling Plan Mode |
 | `@cctag <anything else>` | anyone (in a paired thread) | Sends the text into the paired Claude Code session; its reply is posted back in the thread |
 
 Only one thread can be paired to a given terminal at a time. Only single-word
@@ -104,6 +106,18 @@ thread:
 - **Permission prompts** (e.g. "Do you want to run `rm -rf ...`?"): one
   button per choice, first option styled primary, anything that looks like a
   refusal ("No", "Cancel", "拒否") styled as a danger button.
+
+### Switching model or mode
+
+`@cctag model <name>` and `@cctag plan` run the corresponding Claude Code
+slash command (`/model <name>`, `/plan`) directly, rather than starting a
+conversational turn — the reply is the command's own output (e.g. "Set
+model to Opus and saved as your default for new sessions"), read straight
+off the terminal screen. If switching models mid-conversation triggers a
+confirmation menu ("Switch model? Yes/No"), it's auto-confirmed, since
+asking for the switch already expressed that intent. These commands are
+blocked while a normal turn (or another TUI command) is in progress on the
+same instance.
 
 ### Work started outside of Slack
 
@@ -233,8 +247,8 @@ For a persistent second instance, add a second launchd
 Anyone who can post in a paired thread can send arbitrary text into a
 full-permission local coding agent. Pairing is owner-opt-in per thread, the
 owner can disconnect at any time, and tool permission prompts still require
-someone to approve them (today: at the terminal; Slack buttons are planned).
-Only pair threads in channels with people you trust.
+a human's approval via Slack buttons — nothing runs unattended. Only pair
+threads in channels with people you trust.
 
 ## License
 

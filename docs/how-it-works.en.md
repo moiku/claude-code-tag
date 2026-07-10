@@ -156,6 +156,37 @@ To avoid replaying old history, the very first time it sees a pairing
 session rotation) it just records the transcript's current end as a
 baseline — it only ever reports what happens after that point.
 
+## 5.6 Switching model or mode
+
+`@cctag model <name>` (e.g. `model opus`) and `@cctag plan` are handled by a
+separate path from a normal conversational turn. They just forward Claude
+Code's own slash commands (`/model <name>`, `/plan`) as-is, and aren't
+treated as a `TurnEngine` turn (their output doesn't reliably land in the
+session transcript the way an LLM reply does).
+
+Instead, `commands.ts`'s `runTuiCommand()`:
+
+1. Sends the slash command via herdr, then confirms it with Enter
+2. Polls status; if it goes `blocked` (e.g. the "Switch model? Yes/No"
+   confirmation that appears when switching models mid-conversation), the
+   existing permission-menu parser (`parsePermissionMenu`) auto-confirms the
+   first option — asking for the switch already expressed that intent
+3. Once it settles (`idle`/`done`), reads the screen and relays the
+   command's own output back to Slack as-is
+
+Step 3's pane read has a gotcha: the TUI's screen always ends with a fixed
+footer (a separator, an empty prompt, another separator, then
+model/context/cwd/mode status lines). Reading only the last few lines lands
+entirely inside that footer, missing the actual command output above it. So
+cctag reads a larger chunk and cuts everything from the model/context
+status line downward (a distinctive `ctx ... /rc` pattern), then trims the
+separator/padding right above that (`stripFooterChrome()`).
+
+`TurnEngine` has a separate `externallyBusy` set alongside its normal turn
+tracking, so these TUI commands are treated as "busy" the same way an
+active turn is — this keeps the background watcher (section 5.5) from
+trying to watch the same instance a TUI command is currently driving.
+
 ## 6. Connecting one PC to more than one Slack workspace
 
 A Hub is tied to exactly one workspace (by its Slack app token). To reach a
