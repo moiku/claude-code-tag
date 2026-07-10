@@ -22,4 +22,9 @@ export class WsNotifier implements Notifier {
     const { permalink } = await this.rpc.call<{ permalink: string | null }>("get_permalink", { channel, ts });
     return permalink;
   }
+
+  async getThreadHistorySinceLastBotPost(channel: string, threadTs: string, excludeTs: string): Promise<string[]> {
+    const { lines } = await this.rpc.call<{ lines: string[] }>("get_thread_history", { channel, threadTs, excludeTs });
+    return lines;
+  }
 }

@@ -17,10 +17,12 @@ const HELP_TEXT = [
   "• `@cctag list` — 稼働中のインスタンス一覧",
   "• `@cctag model <name>` — Claude Code のモデルを切り替え（例: `model opus`）",
   "• `@cctag plan` — Plan Mode を有効化",
+  "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
 ].join("\n");
 
 const MODEL_COMMAND_RE = /^model\s+(\S+)$/i;
+const LOG_COMMAND_RE = /^log(?:\s+([\s\S]+))?$/i;
 
 /**
  * The TUI always ends with a fixed ~7-line footer (a separator, an empty
@@ -58,6 +60,8 @@ export interface MentionContext {
   userId: string;
   /** Already mention-stripped and composer-attribution-stripped. */
   text: string;
+  /** This message's own Slack ts — used by `log` to exclude itself from fetched thread history. */
+  ts: string;
 }
 
 export interface PairSelectContext {
@@ -110,7 +114,7 @@ export class CommandHandler {
   }
 
   async handleMention(ctx: MentionContext): Promise<void> {
-    const { channel, threadTs, userId, text } = ctx;
+    const { channel, threadTs, userId, text, ts } = ctx;
     // Only single-word commands are recognized; anything else (including any
     // message containing whitespace/newlines) falls through to a turn below
     // using the FULL text, not a split fragment of it.
@@ -128,6 +132,12 @@ export class CommandHandler {
         return;
       }
       await this.runTuiCommand(channel, threadTs, pairing.terminalId, `/model ${modelMatch[1]}`);
+      return;
+    }
+
+    const logMatch = LOG_COMMAND_RE.exec(text);
+    if (logMatch) {
+      await this.handleLog(channel, threadTs, userId, ts, logMatch[1]?.trim());
       return;
     }
 
@@ -282,6 +292,63 @@ export class CommandHandler {
       await this.notifier.postReply(channel, threadTs, "```\n" + snippet.slice(-1500) + "\n```");
     } finally {
       this.turnEngine.clearBusy(terminalId);
+    }
+  }
+
+  /**
+   * `@cctag log [instruction]` — catches the paired instance up on thread
+   * conversation it wasn't mentioned in (e.g. a review posted by another
+   * Slack bot/human), scoped to messages posted after cctag's own last
+   * message in this thread. With no instruction, defaults to asking the
+   * agent to act on whatever the log contains.
+   */
+  private async handleLog(channel: string, threadTs: string, userId: string, ts: string, instruction?: string): Promise<void> {
+    const pairing = this.pairingStore.get(channel, threadTs);
+    if (!pairing) {
+      await this.notifier.postReply(
+        channel,
+        threadTs,
+        "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+      );
+      return;
+    }
+    if (this.turnEngine.isBusy(pairing.terminalId)) {
+      await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+      return;
+    }
+    if (!this.notifier.getThreadHistorySinceLastBotPost) {
+      await this.notifier.postReply(channel, threadTs, "⚠️ このモードでは `log` コマンドは使えません。");
+      return;
+    }
+
+    let lines: string[];
+    try {
+      lines = await this.notifier.getThreadHistorySinceLastBotPost(channel, threadTs, ts);
+    } catch (err) {
+      await this.notifier.postReply(channel, threadTs, `❌ 履歴取得エラー: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    if (lines.length === 0) {
+      await this.notifier.postReply(channel, threadTs, "cctagの最終発言以降、新しいメッセージはありませんでした。");
+      return;
+    }
+
+    const combined = [
+      "[Slackスレッドの履歴（cctagの最終発言以降）]",
+      lines.join("\n"),
+      "---",
+      instruction || "上記を踏まえて対応してください。",
+    ].join("\n");
+
+    try {
+      await this.turnEngine.startTurn(pairing, userId, combined);
+    } catch (err) {
+      if (err instanceof Error && err.message === "agent-not-found") {
+        this.pairingStore.remove(pairing.key);
+        await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。ペアリングを解除しました。");
+        return;
+      }
+      await this.notifier.postReply(channel, threadTs, `❌ エラー: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

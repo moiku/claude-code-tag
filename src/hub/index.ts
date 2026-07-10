@@ -6,6 +6,7 @@ import { WebSocketServer } from "ws";
 import { loadHubConfig } from "../config.js";
 import { TokenStore } from "./tokenStore.js";
 import { WsRpc } from "../ws/rpc.js";
+import { formatThreadHistorySinceLastBotPost } from "../slack/notifier.js";
 
 const { App } = Bolt;
 
@@ -51,6 +52,9 @@ async function runServer(): Promise<void> {
     appToken: config.slackAppToken,
     socketMode: true,
   });
+
+  const authTest = await app.client.auth.test().catch(() => null);
+  const botUserId = (authTest?.user_id as string | undefined) ?? undefined;
 
   function spokeFor(ownerUserId: string): WsRpc | undefined {
     return spokesByOwner.get(ownerUserId);
@@ -135,6 +139,12 @@ async function runServer(): Promise<void> {
       return { permalink: res?.permalink ?? null };
     });
 
+    rpc.onCall("get_thread_history", async (payload) => {
+      const p = payload as { channel: string; threadTs: string; excludeTs: string };
+      const lines = await formatThreadHistorySinceLastBotPost(app.client, p.channel, p.threadTs, p.excludeTs, botUserId);
+      return { lines };
+    });
+
     ws.on("close", () => {
       if (registeredOwnerId && spokesByOwner.get(registeredOwnerId) === rpc) {
         spokesByOwner.delete(registeredOwnerId);
@@ -155,9 +165,9 @@ async function runServer(): Promise<void> {
       await notConnectedReply(channel, threadTs);
       return;
     }
-    await spoke.call("app_mention", { channel, threadTs, userId, text: event.text ?? "" }).catch((err) =>
-      console.error("[hub] app_mention dispatch failed:", err),
-    );
+    await spoke
+      .call("app_mention", { channel, threadTs, userId, text: event.text ?? "", ts: event.ts })
+      .catch((err) => console.error("[hub] app_mention dispatch failed:", err));
   });
 
   app.event("message", async ({ event }) => {

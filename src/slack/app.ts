@@ -39,6 +39,7 @@ export function buildApp(config: Config) {
       threadTs: threadTsOf(event),
       userId: event.user ?? "",
       text,
+      ts: event.ts,
     });
   });
 

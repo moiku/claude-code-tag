@@ -19,4 +19,12 @@ export interface Notifier {
   postMessage(channel: string, threadTs: string, text: string, blocks?: unknown[]): Promise<MessageHandle>;
   /** Best-effort permalink lookup, used for the "already paired elsewhere" hint. */
   getPermalink?(channel: string, ts: string): Promise<string | null>;
+  /**
+   * Thread messages posted after cctag's own last message in this thread
+   * (or the whole thread, if cctag hasn't posted yet), formatted as one
+   * "speaker: text" line per message. `excludeTs` is the triggering
+   * command's own message ts, dropped from the result. Used by the `log`
+   * command to catch cctag up on conversation it wasn't mentioned in.
+   */
+  getThreadHistorySinceLastBotPost?(channel: string, threadTs: string, excludeTs: string): Promise<string[]>;
 }

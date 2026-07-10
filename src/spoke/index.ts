@@ -56,9 +56,9 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       };
 
       rpc.onCall("app_mention", async (payload) => {
-        const p = payload as { channel: string; threadTs: string; userId: string; text: string };
+        const p = payload as { channel: string; threadTs: string; userId: string; text: string; ts: string };
         const text = stripMention(stripComposerAttribution(p.text));
-        await commands.handleMention({ channel: p.channel, threadTs: p.threadTs, userId: p.userId, text });
+        await commands.handleMention({ channel: p.channel, threadTs: p.threadTs, userId: p.userId, text, ts: p.ts });
         return {};
       });
 
