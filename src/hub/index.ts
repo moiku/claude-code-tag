@@ -1,4 +1,6 @@
 import { createServer } from "node:http";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import Bolt from "@slack/bolt";
 import { WebSocketServer } from "ws";
 import { loadHubConfig } from "../config.js";
@@ -20,9 +22,24 @@ function threadTsOf(event: { thread_ts?: string; ts: string }): string {
   return event.thread_ts ?? event.ts;
 }
 
+/**
+ * One machine can run multiple Hubs (one per Slack workspace, via
+ * CCTAG_ENV_FILE — see config.ts / spoke/index.ts's equivalent pairing-store
+ * namespacing). Without this, every Hub on the box would share one
+ * `~/.cctag-hub/tokens.json`, so a token issued for one workspace would also
+ * be accepted by every other Hub's WebSocket server. The default (no
+ * CCTAG_ENV_FILE) path is left unchanged for backwards compatibility.
+ */
+function tokenStorePath(): string | undefined {
+  const envFile = process.env.CCTAG_ENV_FILE;
+  if (!envFile) return undefined;
+  const safe = envFile.replace(/[^a-zA-Z0-9]/g, "-");
+  return join(homedir(), ".cctag-hub", `tokens-${safe}.json`);
+}
+
 async function runServer(): Promise<void> {
   const config = loadHubConfig();
-  const tokenStore = new TokenStore();
+  const tokenStore = new TokenStore(tokenStorePath());
 
   const spokesByOwner = new Map<string, WsRpc>();
   const threadOwner = new Map<string, string>();
@@ -210,7 +227,7 @@ async function runServer(): Promise<void> {
 }
 
 function runTokenCli(argv: string[]): void {
-  const tokenStore = new TokenStore();
+  const tokenStore = new TokenStore(tokenStorePath());
   const [cmd, arg] = argv;
   switch (cmd) {
     case "issue": {
