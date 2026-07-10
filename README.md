@@ -180,9 +180,37 @@ npm run start:spoke   # or dev:spoke while iterating
 
 The Spoke reconnects automatically (with backoff) if the connection drops.
 Pairing state still lives locally on the Spoke's machine
-(`~/.cctag/pairings.json`) — the Hub only keeps a lightweight, in-memory
-"which thread belongs to which Spoke" map, rebuilt from what each Spoke
-reports on connect.
+(`~/.cctag/pairings-<hub-url>.json`, namespaced per Hub — see below) — the
+Hub only keeps a lightweight, in-memory "which thread belongs to which
+Spoke" map, rebuilt from what each Spoke reports on connect.
+
+### Connecting to more than one Slack workspace
+
+A Hub is tied to exactly one Slack app/workspace (its `SLACK_BOT_TOKEN`/
+`SLACK_APP_TOKEN`). To bridge a second workspace, run a second Hub — it
+doesn't need its own machine; a second lightweight process (own port, own
+`.env`, own systemd unit) on the same box is enough — and a second Spoke on
+each machine that should reach both workspaces.
+
+Both Spokes on one machine still talk to the **same local herdr daemon**,
+so they see the same pool of Claude Code instances — pairing one workspace
+to a terminal doesn't stop the other workspace's picker from also offering
+it. cctag doesn't guard against this across separate Spoke processes (only
+within one Spoke's own pairings); avoid pairing the same terminal from two
+workspaces at once, or you'll get keystrokes interleaved from both.
+
+To run two Spokes from a single checkout, point `CCTAG_ENV_FILE` at a
+per-instance `.env` (e.g. `.env.workspace2`) instead of duplicating the
+whole directory — everything else (`CCTAG_HUB_URL`, `CCTAG_SPOKE_TOKEN`,
+pairing storage) is automatically kept separate per Hub URL:
+
+```bash
+CCTAG_ENV_FILE=/opt/cctag/.env.workspace2 node dist/spoke/index.js
+```
+
+For a persistent second instance, add a second launchd
+`LaunchAgent`/systemd unit whose `EnvironmentVariables`/`Environment` sets
+`CCTAG_ENV_FILE` to that second `.env` file.
 
 ## Security notes
 

@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import WebSocket from "ws";
 import { loadSpokeConfig } from "../config.js";
 import { HerdrClient } from "../herdr/client.js";
@@ -13,9 +15,21 @@ function wsUrlFor(hubUrl: string, token: string): string {
   return url.toString();
 }
 
+/**
+ * One machine can run multiple Spokes (one per Slack workspace/Hub, via
+ * CCTAG_ENV_FILE — see config.ts). All of them talk to the same local herdr
+ * daemon, so they'd silently clobber each other's pairing state if they
+ * shared one `~/.cctag/pairings.json`. Namespace it by Hub URL automatically
+ * so no extra config is needed for this to just work.
+ */
+function pairingStorePathFor(hubUrl: string): string {
+  const safe = hubUrl.replace(/[^a-zA-Z0-9]/g, "-");
+  return join(homedir(), ".cctag", `pairings-${safe}.json`);
+}
+
 function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> {
   const herdr = new HerdrClient(config.herdrBin);
-  const pairingStore = new PairingStore();
+  const pairingStore = new PairingStore(pairingStorePathFor(config.hubUrl));
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrlFor(config.hubUrl, config.spokeToken));

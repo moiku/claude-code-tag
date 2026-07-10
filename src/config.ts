@@ -1,6 +1,11 @@
 import { config as loadDotenv } from "dotenv";
 
-loadDotenv();
+// Lets one machine run multiple instances (e.g. one Spoke per Slack
+// workspace) from a single checkout: point CCTAG_ENV_FILE at a different
+// .env per instance (set it in that instance's launchd plist / systemd unit
+// / wrapper script — it must come from the real process environment, not
+// from a .env file, since it decides which .env file to load).
+loadDotenv(process.env.CCTAG_ENV_FILE ? { path: process.env.CCTAG_ENV_FILE } : undefined);
 
 function required(name: string): string {
   const v = process.env[name];
