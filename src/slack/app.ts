@@ -4,6 +4,7 @@ import { HerdrClient } from "../herdr/client.js";
 import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
+import { BackgroundWatcher } from "../watcher.js";
 import { SlackNotifier } from "./notifier.js";
 
 const { App } = Bolt;
@@ -28,6 +29,7 @@ export function buildApp(config: Config) {
     pollIntervalMs: config.pollIntervalMs,
   });
   const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
+  new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier).start();
 
   app.event("app_mention", async ({ event }) => {
     if ("bot_id" in event && event.bot_id) return;

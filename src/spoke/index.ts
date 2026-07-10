@@ -6,6 +6,7 @@ import { HerdrClient } from "../herdr/client.js";
 import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
+import { BackgroundWatcher } from "../watcher.js";
 import { WsRpc } from "../ws/rpc.js";
 import { WsNotifier } from "./notifier.js";
 
@@ -42,6 +43,9 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
         pollIntervalMs: config.pollIntervalMs,
       });
       const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
+      const watcher = new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier);
+      watcher.start();
+      ws.once("close", () => watcher.stop());
 
       pairingStore.onChange = (change) => {
         rpc.notify("pairing_changed", {
