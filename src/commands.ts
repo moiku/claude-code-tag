@@ -173,21 +173,38 @@ export class CommandHandler {
       return;
     }
 
-    const existing = this.pairingStore.byTerminal(terminalId);
-    if (existing) {
-      const link = await this.notifier.getPermalink?.(existing.channel, existing.threadTs ?? "").catch(() => null);
-      await this.notifier.postReply(
-        channel,
-        threadTs,
-        `⚠️ このインスタンスは既に他のスレッドに接続されています${link ? `: ${link}` : ""}`,
-      );
-      return;
-    }
-
     const agent = await this.herdr.agentGet(terminalId);
     if (!agent) {
       await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
       return;
+    }
+
+    const existing = this.pairingStore.byTerminal(terminalId);
+    if (existing) {
+      // The old pairing might be a zombie: its terminalId can still exist
+      // in herdr (e.g. Claude Code was exited and a new session started in
+      // the same pane) even though the conversation it was paired to is
+      // long gone. Only block on a *live* conflict with someone else's
+      // pairing — a stale entry, or the same owner re-picking a terminal
+      // they already had paired, gets moved automatically instead.
+      if (existing.pairedBy === userId) {
+        this.pairingStore.remove(existing.key);
+        if (existing.key !== PairingStore.threadKey(channel, threadTs)) {
+          await this.notifier.postReply(
+            existing.channel,
+            existing.threadTs ?? "",
+            "🔌 このインスタンスは別のスレッドに接続し直されました。",
+          );
+        }
+      } else {
+        const link = await this.notifier.getPermalink?.(existing.channel, existing.threadTs ?? "").catch(() => null);
+        await this.notifier.postReply(
+          channel,
+          threadTs,
+          `⚠️ このインスタンスは既に他のスレッドに接続されています${link ? `: ${link}` : ""}`,
+        );
+        return;
+      }
     }
 
     this.pairingStore.add({
