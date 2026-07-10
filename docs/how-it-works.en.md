@@ -134,6 +134,28 @@ There are two ways to answer:
   to the "Type something" row with the Down arrow key, types the text, and
   presses Enter
 
+## 5.5 Work started without going through Slack
+
+Everything in section 4 ("From `@cctag connect` to an actual conversation")
+happens inside a **turn** — cctag only reads the transcript or watches
+status while that turn is running.
+
+So what happens if you start a conversation directly at the terminal
+(Claude Code app), never touching Slack at all? **Nothing gets posted.**
+There's no turn, so there's nothing watching.
+
+That's awkward for a common workflow — start a long task at the terminal,
+pair cctag partway through — so `src/watcher.ts`'s **background watcher**
+covers this separately. It polls every paired instance with no active turn
+roughly every 7 seconds; when one transitions from working/blocked to
+idle/done, it posts the newly-produced text to the paired thread, prefixed
+with 🖥️.
+
+To avoid replaying old history, the very first time it sees a pairing
+(right after pairing, right after an active turn just finished, or after a
+session rotation) it just records the transcript's current end as a
+baseline — it only ever reports what happens after that point.
+
 ## 6. Connecting one PC to more than one Slack workspace
 
 A Hub is tied to exactly one workspace (by its Slack app token). To reach a

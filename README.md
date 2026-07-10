@@ -105,6 +105,16 @@ thread:
   button per choice, first option styled primary, anything that looks like a
   refusal ("No", "Cancel", "拒否") styled as a danger button.
 
+### Work started outside of Slack
+
+cctag only actively watches a paired instance while a Slack-initiated turn
+is running. If you start something directly at the terminal — before ever
+pairing, or a long task you kicked off locally and paired mid-run — a
+background watcher (polling every ~7s) notices once it settles
+(working/blocked → idle/done) and posts the new output to the paired
+thread, prefixed with 🖥️. It never replays old history, so pairing mid-task
+only reports what happens *after* pairing.
+
 Multi-question `AskUserQuestion` prompts are answered one question at a
 time — after you answer, cctag reads the next one off the screen.
 
