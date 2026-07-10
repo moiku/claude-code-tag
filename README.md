@@ -37,6 +37,11 @@ questions (like pending permission prompts) are read directly off the
 terminal screen via `herdr pane read`, not from the transcript. See
 `src/prompts.ts`.
 
+For a fuller walkthrough of the mechanism (aimed at lab students, in
+Japanese) — Hub/Spoke roles, how herdr's agent registry differs from raw
+pane access, the AskUserQuestion detection quirk, multi-workspace caveats —
+see [docs/how-it-works.md](docs/how-it-works.md).
+
 ## Requirements
 
 - [herdr](https://herdr.dev) installed and running, with one or more Claude
