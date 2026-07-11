@@ -23,8 +23,15 @@ interface WatchState {
  * started directly at the terminal (before pairing, or between Slack turns)
  * finishes invisibly. This watcher covers that gap: for every paired
  * instance with no active turn, it polls at a relaxed interval and posts to
- * the thread when the instance settles (working/blocked -> idle/done) with
- * new assistant output.
+ * the thread when the instance settles (working -> idle/done) with new
+ * assistant output.
+ *
+ * If it instead finds the instance `blocked` — an AskUserQuestion or
+ * permission prompt is on screen, waiting on a decision — it doesn't just
+ * wait for that to resolve on its own (it might never, if no one's at the
+ * keyboard): it hands the terminal off to TurnEngine.adoptBlockedTerminal(),
+ * which runs the same pollLoop() a Slack-initiated turn uses, so the prompt
+ * gets posted as Slack buttons and can be answered remotely.
  *
  * It deliberately does not replay history: the first time it sees a pairing
  * (including right after an active turn just finished, when it resumes
@@ -112,6 +119,18 @@ export class BackgroundWatcher {
       const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
       state.offset = newOffset;
       state.collected.push(...extractAssistantText(records));
+    }
+
+    if (agent.agentStatus === "blocked") {
+      this.watches.delete(pairing.terminalId);
+      await this.turnEngine.adoptBlockedTerminal(pairing, {
+        sessionId: state.sessionId,
+        transcriptPath: state.transcriptPath,
+        offset: state.offset,
+        collected: state.collected,
+        paneId: agent.paneId,
+      });
+      return;
     }
 
     const wasActive = state.lastStatus === "working" || state.lastStatus === "blocked";

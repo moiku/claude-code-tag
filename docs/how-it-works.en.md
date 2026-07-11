@@ -147,14 +147,30 @@ There's no turn, so there's nothing watching.
 That's awkward for a common workflow — start a long task at the terminal,
 pair cctag partway through — so `src/watcher.ts`'s **background watcher**
 covers this separately. It polls every paired instance with no active turn
-roughly every 7 seconds; when one transitions from working/blocked to
-idle/done, it posts the newly-produced text to the paired thread, prefixed
-with 🖥️.
+roughly every 7 seconds; when one transitions from working to idle/done, it
+posts the newly-produced text to the paired thread, prefixed with 🖥️.
 
 To avoid replaying old history, the very first time it sees a pairing
 (right after pairing, right after an active turn just finished, or after a
 session rotation) it just records the transcript's current end as a
 baseline — it only ever reports what happens after that point.
+
+What if that terminal-driven work instead hits an AskUserQuestion or a
+permission prompt? Just waiting for `idle`/`done` isn't enough — if no one
+answers it, the terminal stays `blocked` forever, and the watcher would
+never notice anything (this exact gap surfaced during development and is
+what the following fix closes).
+
+So instead of waiting, the moment the watcher sees `blocked` it hands that
+terminal off to `TurnEngine.adoptBlockedTerminal()` — putting it on the
+**exact same `pollLoop()`** a Slack-initiated turn uses, sending no new
+input (the prompt is already on screen). That means the AskUserQuestion/
+permission parsing, Slack button posting, button-click and free-text
+answering, and "answered directly at the terminal" detection are all the
+same existing code, whether the turn started from Slack or was discovered
+mid-flight at the terminal. Once handed off, `watcher.ts` stops tracking it
+(removed from `this.watches`); when it finishes, `TurnEngine` removes it
+from `turns`, and the next poll cycle re-baselines it as a fresh pairing.
 
 ## 5.6 Switching model or mode
 

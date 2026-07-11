@@ -48,6 +48,17 @@ export interface TurnEngineOptions {
 
 export type AnswerResult = { ok: true } | { ok: false; reason: "not-pending" };
 
+/** Transcript-tracking state BackgroundWatcher had already collected for a
+ * pairing before it noticed the terminal was blocked — handed over so
+ * adoptBlockedTerminal() doesn't lose or re-read anything. */
+export interface BlockedTerminalHandoff {
+  sessionId: string;
+  transcriptPath: string;
+  offset: number;
+  collected: string[];
+  paneId: string;
+}
+
 export class TurnEngine {
   private turns = new Map<string, TurnState>();
   // Terminals busy for a reason other than an active turn (e.g. commands.ts
@@ -125,6 +136,50 @@ export class TurnEngine {
     await this.herdr.agentSend(terminalId, normalized);
     await sleep(300);
     await this.herdr.paneSendKeys(agent.paneId, "Enter");
+
+    void this.pollLoop(terminalId).catch((err) => {
+      console.error(`[turn ${terminalId}] poll loop crashed:`, err);
+      this.turns.delete(terminalId);
+    });
+  }
+
+  /**
+   * BackgroundWatcher calls this when it notices a paired terminal has gone
+   * `blocked` with no active Slack-initiated turn running (i.e. work started
+   * directly at the terminal just hit an AskUserQuestion or permission
+   * prompt). Registering a TurnState and running the same pollLoop() a
+   * normal turn uses means the existing AskUserQuestion/permission button
+   * flow — and answering it from Slack — works identically whether the turn
+   * was Slack-initiated or discovered mid-flight; no input is sent, since
+   * the terminal is already sitting at the prompt.
+   */
+  async adoptBlockedTerminal(pairing: Pairing, handoff: BlockedTerminalHandoff): Promise<void> {
+    const terminalId = pairing.terminalId;
+    if (this.turns.has(terminalId)) return;
+
+    const statusHandle = await this.notifier.postMessage(
+      pairing.channel,
+      pairing.threadTs ?? "",
+      "🖥️ ターミナル側で入力待ちを検出しました…",
+    );
+
+    const state: TurnState = {
+      phase: "running",
+      pairing,
+      requesterUserId: pairing.pairedBy,
+      paneId: handoff.paneId,
+      sessionId: handoff.sessionId,
+      transcriptPath: handoff.transcriptPath,
+      offset: handoff.offset,
+      collected: [...handoff.collected],
+      toolCounts: {},
+      statusHandle,
+      lastStatusUpdateAt: 0,
+      startedAt: Date.now(),
+      abort: new AbortController(),
+      currentPromptId: 0,
+    };
+    this.turns.set(terminalId, state);
 
     void this.pollLoop(terminalId).catch((err) => {
       console.error(`[turn ${terminalId}] poll loop crashed:`, err);

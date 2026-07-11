@@ -140,9 +140,15 @@ cctag only actively watches a paired instance while a Slack-initiated turn
 is running. If you start something directly at the terminal — before ever
 pairing, or a long task you kicked off locally and paired mid-run — a
 background watcher (polling every ~7s) notices once it settles
-(working/blocked → idle/done) and posts the new output to the paired
-thread, prefixed with 🖥️. It never replays old history, so pairing mid-task
-only reports what happens *after* pairing.
+(working → idle/done) and posts the new output to the paired thread,
+prefixed with 🖥️. It never replays old history, so pairing mid-task only
+reports what happens *after* pairing.
+
+If that terminal-driven work instead hits an `AskUserQuestion` or
+permission prompt, the watcher doesn't just wait for it to resolve on its
+own — it hands the terminal off to the same turn machinery a Slack-initiated
+message uses, so the prompt gets posted as Slack buttons (and can be
+answered from the thread) even though nothing was ever sent via `@cctag`.
 
 Multi-question `AskUserQuestion` prompts are answered one question at a
 time — after you answer, cctag reads the next one off the screen.
