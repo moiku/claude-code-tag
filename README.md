@@ -204,12 +204,14 @@ Run the Hub under systemd (`ExecStart=/usr/bin/node dist/hub/index.js`,
 `assets/cctag-hub.service` for a template unit file — then `systemctl
 enable --now caddy cctag-hub`.
 
-Issue each person a token from the Hub (this is the auth boundary — anyone
-holding a token can register as any owner, so only hand these to people you
-trust):
+Issue each person a token from the Hub, bound to their own Slack user ID —
+a token can only ever register as the owner it was issued for, so a leaked
+or misused token can't be used to impersonate someone else's connection
+(but it can still act on that owner's own paired threads, so only hand
+these to people you trust):
 
 ```bash
-node dist/hub/index.js token issue <name>   # prints a token
+node dist/hub/index.js token issue <name> <ownerUserId>   # prints a token
 node dist/hub/index.js token list
 node dist/hub/index.js token revoke <name>
 ```
@@ -217,7 +219,8 @@ node dist/hub/index.js token revoke <name>
 ### Running a Spoke
 
 Same `.env` as standalone mode (`CCTAG_OWNER_USER_ID`, `CCTAG_HERDR_BIN`,
-etc.) but with the Slack tokens replaced by the Hub connection:
+etc.) but with the Slack tokens replaced by the Hub connection. `CCTAG_OWNER_USER_ID`
+must match the `ownerUserId` the token was issued for:
 
 ```bash
 CCTAG_HUB_URL=wss://your.domain.example

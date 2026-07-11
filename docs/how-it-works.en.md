@@ -249,8 +249,10 @@ keystrokes would collide.
   you trust
 - Permission prompts (e.g. confirming a dangerous command) still require a
   human's approval via Slack buttons — nothing runs unattended
-- Anyone holding a Hub token (from `token issue`) can register as any Slack
-  user, so only hand tokens to people you trust
+- A Hub token (`token issue <name> <ownerUserId>`) is bound to the Slack
+  user ID it was issued for and can't register as anyone else — but it can
+  still act on that owner's own paired threads, so only hand tokens to
+  people you trust
 
 ## See also
 
