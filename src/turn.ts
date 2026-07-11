@@ -66,6 +66,10 @@ export class TurnEngine {
   // isBusy() covers both, and the BackgroundWatcher doesn't try to watch the
   // same instance a non-turn command is currently driving.
   private externallyBusy = new Set<string>();
+  // Terminals in the middle of startTurn()'s async setup, before a TurnState
+  // exists in `turns` yet — closes the race where two concurrent calls for
+  // the same terminal could both pass the busy check.
+  private reserving = new Set<string>();
 
   constructor(
     private readonly herdr: HerdrClient,
@@ -74,7 +78,7 @@ export class TurnEngine {
   ) {}
 
   isBusy(terminalId: string): boolean {
-    return this.turns.has(terminalId) || this.externallyBusy.has(terminalId);
+    return this.turns.has(terminalId) || this.externallyBusy.has(terminalId) || this.reserving.has(terminalId);
   }
 
   markBusy(terminalId: string): void {
@@ -94,53 +98,70 @@ export class TurnEngine {
 
   async startTurn(pairing: Pairing, requesterUserId: string, text: string): Promise<void> {
     const terminalId = pairing.terminalId;
-    if (this.turns.has(terminalId)) {
+    // Reserve the slot synchronously, before any `await` — otherwise two
+    // concurrent calls for the same terminal (e.g. a duplicate Slack event)
+    // can both pass the busy check before either inserts into `turns`,
+    // leaving one turn's state silently overwritten and untracked.
+    if (this.isBusy(terminalId)) {
       throw new Error("busy");
     }
+    this.reserving.add(terminalId);
 
-    const agent = await this.herdr.agentGet(terminalId);
-    if (!agent) {
-      throw new Error("agent-not-found");
+    try {
+      const agent = await this.herdr.agentGet(terminalId);
+      if (!agent) {
+        throw new Error("agent-not-found");
+      }
+
+      const sessionId = agent.sessionId ?? "";
+      const tPath = sessionId ? transcriptPath(agent.cwd, sessionId) : "";
+      const offset = tPath ? transcriptSizeSafe(tPath) : 0;
+
+      const statusHandle = await this.notifier.postMessage(pairing.channel, pairing.threadTs ?? "", "⚙️ 実行中…");
+
+      const state: TurnState = {
+        phase: "running",
+        pairing,
+        requesterUserId,
+        paneId: agent.paneId,
+        sessionId,
+        transcriptPath: tPath,
+        offset,
+        collected: [],
+        toolCounts: {},
+        statusHandle,
+        lastStatusUpdateAt: 0,
+        startedAt: Date.now(),
+        abort: new AbortController(),
+        currentPromptId: 0,
+      };
+      this.turns.set(terminalId, state);
+
+      const normalized = text
+        .replace(/<@[^>|]+(\|[^>]+)?>/g, "")
+        .replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "$2 ($1)")
+        .replace(/<(https?:\/\/[^>]+)>/g, "$1")
+        .trim();
+
+      try {
+        await this.herdr.agentSend(terminalId, normalized);
+        await sleep(300);
+        await this.herdr.paneSendKeys(agent.paneId, "Enter");
+      } catch (err) {
+        // Input injection failed after the state was already registered —
+        // roll it back so the terminal doesn't stay stuck "busy" forever.
+        this.turns.delete(terminalId);
+        await statusHandle.update("❌ 開始に失敗しました").catch(() => {});
+        throw err;
+      }
+
+      void this.pollLoop(terminalId).catch((err) => {
+        console.error(`[turn ${terminalId}] poll loop crashed:`, err);
+        this.turns.delete(terminalId);
+      });
+    } finally {
+      this.reserving.delete(terminalId);
     }
-
-    const sessionId = agent.sessionId ?? "";
-    const tPath = sessionId ? transcriptPath(agent.cwd, sessionId) : "";
-    const offset = tPath ? transcriptSizeSafe(tPath) : 0;
-
-    const statusHandle = await this.notifier.postMessage(pairing.channel, pairing.threadTs ?? "", "⚙️ 実行中…");
-
-    const state: TurnState = {
-      phase: "running",
-      pairing,
-      requesterUserId,
-      paneId: agent.paneId,
-      sessionId,
-      transcriptPath: tPath,
-      offset,
-      collected: [],
-      toolCounts: {},
-      statusHandle,
-      lastStatusUpdateAt: 0,
-      startedAt: Date.now(),
-      abort: new AbortController(),
-      currentPromptId: 0,
-    };
-    this.turns.set(terminalId, state);
-
-    const normalized = text
-      .replace(/<@[^>|]+(\|[^>]+)?>/g, "")
-      .replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "$2 ($1)")
-      .replace(/<(https?:\/\/[^>]+)>/g, "$1")
-      .trim();
-
-    await this.herdr.agentSend(terminalId, normalized);
-    await sleep(300);
-    await this.herdr.paneSendKeys(agent.paneId, "Enter");
-
-    void this.pollLoop(terminalId).catch((err) => {
-      console.error(`[turn ${terminalId}] poll loop crashed:`, err);
-      this.turns.delete(terminalId);
-    });
   }
 
   /**
@@ -155,36 +176,44 @@ export class TurnEngine {
    */
   async adoptBlockedTerminal(pairing: Pairing, handoff: BlockedTerminalHandoff): Promise<void> {
     const terminalId = pairing.terminalId;
-    if (this.turns.has(terminalId)) return;
+    // Same reservation as startTurn() — a Slack-initiated turn could start
+    // for this terminal in the window between the watcher's isBusy() check
+    // and this method actually registering a TurnState.
+    if (this.isBusy(terminalId)) return;
+    this.reserving.add(terminalId);
 
-    const statusHandle = await this.notifier.postMessage(
-      pairing.channel,
-      pairing.threadTs ?? "",
-      "🖥️ ターミナル側で入力待ちを検出しました…",
-    );
+    try {
+      const statusHandle = await this.notifier.postMessage(
+        pairing.channel,
+        pairing.threadTs ?? "",
+        "🖥️ ターミナル側で入力待ちを検出しました…",
+      );
 
-    const state: TurnState = {
-      phase: "running",
-      pairing,
-      requesterUserId: pairing.pairedBy,
-      paneId: handoff.paneId,
-      sessionId: handoff.sessionId,
-      transcriptPath: handoff.transcriptPath,
-      offset: handoff.offset,
-      collected: [...handoff.collected],
-      toolCounts: {},
-      statusHandle,
-      lastStatusUpdateAt: 0,
-      startedAt: Date.now(),
-      abort: new AbortController(),
-      currentPromptId: 0,
-    };
-    this.turns.set(terminalId, state);
+      const state: TurnState = {
+        phase: "running",
+        pairing,
+        requesterUserId: pairing.pairedBy,
+        paneId: handoff.paneId,
+        sessionId: handoff.sessionId,
+        transcriptPath: handoff.transcriptPath,
+        offset: handoff.offset,
+        collected: [...handoff.collected],
+        toolCounts: {},
+        statusHandle,
+        lastStatusUpdateAt: 0,
+        startedAt: Date.now(),
+        abort: new AbortController(),
+        currentPromptId: 0,
+      };
+      this.turns.set(terminalId, state);
 
-    void this.pollLoop(terminalId).catch((err) => {
-      console.error(`[turn ${terminalId}] poll loop crashed:`, err);
-      this.turns.delete(terminalId);
-    });
+      void this.pollLoop(terminalId).catch((err) => {
+        console.error(`[turn ${terminalId}] poll loop crashed:`, err);
+        this.turns.delete(terminalId);
+      });
+    } finally {
+      this.reserving.delete(terminalId);
+    }
   }
 
   async answerQuestionButton(terminalId: string, promptId: number, optionIndex: number): Promise<AnswerResult> {
@@ -245,6 +274,12 @@ export class TurnEngine {
     while (!state.abort.signal.aborted) {
       const interval = state.phase === "running" ? this.opts.pollIntervalMs : Math.max(this.opts.pollIntervalMs, 5_000);
       await sleep(interval);
+      // Re-check: this loop's turn may have been aborted (and a new one
+      // started for the same terminal) while we were asleep. finalize()
+      // looks up state by terminalId, not by this closure's object identity,
+      // so a stale loop reaching it after abort could delete/finalize a
+      // different, newly-started turn.
+      if (state.abort.signal.aborted) return;
 
       const agent = await this.herdr.agentGet(terminalId).catch(() => null);
       if (!agent) {
@@ -276,6 +311,15 @@ export class TurnEngine {
           const suffix = lastTool ? ` — 🔧 ${lastTool}` : "";
           await state.statusHandle.update(`⚙️ 実行中… (${elapsed}s)${suffix}`).catch(() => {});
         }
+      }
+
+      // Applied before the `blocked` branch's `continue` below — otherwise an
+      // unanswered prompt (nobody at the keyboard, nobody clicking the Slack
+      // button) would keep the terminal "busy" forever, since blocked never
+      // reaches the timeout check further down.
+      if (Date.now() - state.startedAt > this.opts.turnTimeoutMs) {
+        await this.finalize(terminalId, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
+        return;
       }
 
       if (agent.agentStatus === "blocked") {
@@ -326,11 +370,6 @@ export class TurnEngine {
 
       if (agent.agentStatus === "idle" || agent.agentStatus === "done") {
         await this.finalize(terminalId);
-        return;
-      }
-
-      if (Date.now() - state.startedAt > this.opts.turnTimeoutMs) {
-        await this.finalize(terminalId, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
         return;
       }
     }

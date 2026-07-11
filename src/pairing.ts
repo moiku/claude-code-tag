@@ -32,13 +32,18 @@ export class PairingStore {
   }
 
   private load(): void {
+    let raw: string;
     try {
-      const raw = readFileSync(this.path, "utf8");
-      const list = JSON.parse(raw) as Pairing[];
-      for (const p of list) this.pairings.set(p.key, p);
-    } catch {
-      // no store yet — start empty
+      raw = readFileSync(this.path, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // no store yet — start empty
+      throw err; // permission error, etc. — don't silently start empty and
+      // risk the next add()/remove() overwriting a store we couldn't
+      // actually read (see: the accidental pairings-wipe incident this
+      // guards against)
     }
+    const list = JSON.parse(raw) as Pairing[]; // a parse failure should throw loudly, not start empty
+    for (const p of list) this.pairings.set(p.key, p);
   }
 
   private save(): void {
@@ -73,17 +78,32 @@ export class PairingStore {
   }
 
   add(p: Pairing): void {
+    const previous = this.pairings.get(p.key);
     this.pairings.set(p.key, p);
-    this.save();
+    try {
+      this.save();
+    } catch (err) {
+      // Keep in-memory state consistent with what's actually on disk —
+      // otherwise a restart would silently revert this "successful" add.
+      if (previous) this.pairings.set(p.key, previous);
+      else this.pairings.delete(p.key);
+      throw err;
+    }
     this.onChange?.({ action: "add", pairing: p });
   }
 
   remove(key: string): boolean {
     const existing = this.pairings.get(key);
-    const existed = this.pairings.delete(key);
-    if (existed) this.save();
-    if (existed && existing) this.onChange?.({ action: "remove", pairing: existing });
-    return existed;
+    if (!existing) return false;
+    this.pairings.delete(key);
+    try {
+      this.save();
+    } catch (err) {
+      this.pairings.set(key, existing);
+      throw err;
+    }
+    this.onChange?.({ action: "remove", pairing: existing });
+    return true;
   }
 
   list(): Pairing[] {

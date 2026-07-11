@@ -69,8 +69,21 @@ export async function formatThreadHistorySinceLastBotPost(
   excludeTs: string,
   botUserId: string | undefined,
 ): Promise<string[]> {
-  const res = await client.conversations.replies({ channel, ts: threadTs, limit: 200 }).catch(() => null);
-  const messages = (res?.messages ?? []) as RepliesMessage[];
+  // conversations.replies returns oldest-first and paginates forward toward
+  // the newest messages — a single un-paginated call on a thread with more
+  // than one page of history would silently omit the most recent messages
+  // (and possibly cctag's own last post), which is exactly the tail this
+  // function needs. Page up to a generous cap rather than assume one page
+  // covers a real lab-usage thread.
+  const messages: RepliesMessage[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 10; page++) {
+    const res = await client.conversations.replies({ channel, ts: threadTs, limit: 200, cursor }).catch(() => null);
+    if (!res) break;
+    messages.push(...((res.messages ?? []) as RepliesMessage[]));
+    cursor = res.response_metadata?.next_cursor || undefined;
+    if (!cursor) break;
+  }
 
   let lastBotIdx = -1;
   if (botUserId) {

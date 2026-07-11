@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -6,17 +6,21 @@ import { randomBytes } from "node:crypto";
 export interface IssuedToken {
   token: string;
   name: string;
+  /** The only Slack user ID this token may register as — closes off a
+   * hijacking path where any token holder could register as (and take over
+   * the live connection of) any other owner. */
+  ownerUserId: string;
   issuedAt: string;
 }
 
 const DEFAULT_STORE_PATH = join(homedir(), ".cctag-hub", "tokens.json");
 
 /**
- * The Hub's registry of tokens it will accept from connecting Spokes. The
- * token itself is the authorization boundary — whoever holds a valid token
- * can register as any `ownerUserId` (supplied by the Spoke at connect time),
- * so tokens should only be handed to people you trust with your Slack
- * workspace's cctag access.
+ * The Hub's registry of tokens it will accept from connecting Spokes. Each
+ * token is bound to one Slack user ID at issue time — a token can only
+ * register as its own owner, so tokens should still only be handed to
+ * people you trust, but a stolen or misused token can't be used to
+ * impersonate someone else's connection.
  */
 export class TokenStore {
   private tokens = new Map<string, IssuedToken>();
@@ -37,15 +41,26 @@ export class TokenStore {
   }
 
   private save(): void {
-    mkdirSync(dirname(this.path), { recursive: true });
+    const dir = dirname(this.path);
+    mkdirSync(dir, { recursive: true });
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // best-effort — directory may be owned by another user in unusual setups
+    }
     const tmp = `${this.path}.tmp`;
-    writeFileSync(tmp, JSON.stringify([...this.tokens.values()], null, 2));
+    writeFileSync(tmp, JSON.stringify([...this.tokens.values()], null, 2), { mode: 0o600 });
     renameSync(tmp, this.path);
+    try {
+      chmodSync(this.path, 0o600);
+    } catch {
+      // best-effort, see above
+    }
   }
 
-  issue(name: string): IssuedToken {
+  issue(name: string, ownerUserId: string): IssuedToken {
     const token = randomBytes(24).toString("base64url");
-    const entry: IssuedToken = { token, name, issuedAt: new Date().toISOString() };
+    const entry: IssuedToken = { token, name, ownerUserId, issuedAt: new Date().toISOString() };
     this.tokens.set(token, entry);
     this.save();
     return entry;

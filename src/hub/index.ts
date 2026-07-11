@@ -44,7 +44,7 @@ async function runServer(): Promise<void> {
 
   const spokesByOwner = new Map<string, WsRpc>();
   const threadOwner = new Map<string, string>();
-  const messageLocations = new Map<string, { channel: string; ts: string }>();
+  const messageLocations = new Map<string, { channel: string; ts: string; ownerUserId: string }>();
   let msgSeq = 0;
 
   const app = new App({
@@ -72,8 +72,12 @@ async function runServer(): Promise<void> {
   const wss = new WebSocketServer({ server: httpServer, path: "/spoke" });
 
   wss.on("connection", (ws, req) => {
-    const url = new URL(req.url ?? "", "http://localhost");
-    const token = url.searchParams.get("token") ?? "";
+    // Read the bearer token from a header, not the URL query string — query
+    // strings routinely end up in reverse-proxy and HTTP access logs (Caddy
+    // included), which would otherwise leak every Spoke's credential to
+    // anyone who can read those logs.
+    const authHeader = req.headers.authorization ?? "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length) : "";
     const issued = tokenStore.validate(token);
     if (!issued) {
       ws.close(4001, "invalid token");
@@ -83,8 +87,28 @@ async function runServer(): Promise<void> {
     const rpc = new WsRpc(ws);
     let registeredOwnerId: string | undefined;
 
+    // A connected Spoke may only act on threads it actually owns (per
+    // threadOwner) — an unowned thread (no pairing yet, e.g. mid-`connect`)
+    // is allowed through, since that's the legitimate first-contact case.
+    function canActOn(channel: string, threadTs: string): boolean {
+      if (!registeredOwnerId) return false;
+      const owner = threadOwner.get(threadKey(channel, threadTs));
+      return owner === undefined || owner === registeredOwnerId;
+    }
+
     rpc.onCall("register", (payload) => {
       const { ownerUserId, pairings } = payload as RegisterPayload;
+      // The token is bound to one ownerUserId at issue time — otherwise any
+      // token holder could register as (and knock offline) any other
+      // owner's live connection and receive their future Slack events.
+      if (ownerUserId !== issued.ownerUserId) {
+        console.error(`[hub] rejected register: token "${issued.name}" is not authorized for owner ${ownerUserId}`);
+        // Close rather than just returning {ok:false} — a misconfigured
+        // Spoke should see its connection fail loudly, not silently sit
+        // "registered" while every subsequent action gets rejected.
+        ws.close(4003, "owner mismatch");
+        return { ok: false };
+      }
       registeredOwnerId = ownerUserId;
       const prior = spokesByOwner.get(ownerUserId);
       if (prior && prior !== rpc) prior.close();
@@ -101,19 +125,33 @@ async function runServer(): Promise<void> {
 
     rpc.onNotify("pairing_changed", (payload) => {
       const p = payload as { channel: string; threadTs?: string; action: "add" | "remove" };
+      if (!registeredOwnerId) return;
       const key = threadKey(p.channel, p.threadTs);
-      if (p.action === "add" && registeredOwnerId) threadOwner.set(key, registeredOwnerId);
-      else if (p.action === "remove") threadOwner.delete(key);
+      const owner = threadOwner.get(key);
+      if (p.action === "add") {
+        if (owner && owner !== registeredOwnerId) return; // already owned by someone else — ignore
+        threadOwner.set(key, registeredOwnerId);
+      } else if (p.action === "remove" && owner === registeredOwnerId) {
+        threadOwner.delete(key);
+      }
     });
 
     rpc.onCall("post_reply", async (payload) => {
       const p = payload as { channel: string; threadTs: string; text: string };
+      if (!canActOn(p.channel, p.threadTs)) {
+        console.error(`[hub] rejected post_reply from ${issued.name}: not authorized for ${p.channel}:${p.threadTs}`);
+        return {};
+      }
       await app.client.chat.postMessage({ channel: p.channel, thread_ts: p.threadTs || undefined, text: p.text });
       return {};
     });
 
     rpc.onCall("post_message", async (payload) => {
       const p = payload as { channel: string; threadTs: string; text: string; blocks?: unknown[] };
+      if (!canActOn(p.channel, p.threadTs)) {
+        console.error(`[hub] rejected post_message from ${issued.name}: not authorized for ${p.channel}:${p.threadTs}`);
+        return { msgId: "" };
+      }
       const res = await app.client.chat.postMessage({
         channel: p.channel,
         thread_ts: p.threadTs || undefined,
@@ -121,18 +159,22 @@ async function runServer(): Promise<void> {
         blocks: p.blocks as never,
       });
       const msgId = `m${++msgSeq}`;
-      messageLocations.set(msgId, { channel: p.channel, ts: res.ts as string });
+      messageLocations.set(msgId, { channel: p.channel, ts: res.ts as string, ownerUserId: registeredOwnerId! });
       return { msgId };
     });
 
     rpc.onCall("update_message", async (payload) => {
       const p = payload as { msgId: string; text: string; blocks?: unknown[] };
       const loc = messageLocations.get(p.msgId);
-      if (!loc) return {};
+      if (!loc || loc.ownerUserId !== registeredOwnerId) return {};
       await app.client.chat.update({ channel: loc.channel, ts: loc.ts, text: p.text, blocks: p.blocks as never });
       return {};
     });
 
+    // Permalinks don't expose message content (just a URL a visitor would
+    // still need real Slack access to resolve), and the "already paired
+    // elsewhere" hint legitimately looks up a permalink for a thread owned
+    // by a *different* owner — so this one is intentionally left unscoped.
     rpc.onCall("get_permalink", async (payload) => {
       const p = payload as { channel: string; ts: string };
       const res = await app.client.chat.getPermalink({ channel: p.channel, message_ts: p.ts }).catch(() => null);
@@ -141,6 +183,7 @@ async function runServer(): Promise<void> {
 
     rpc.onCall("get_thread_history", async (payload) => {
       const p = payload as { channel: string; threadTs: string; excludeTs: string };
+      if (!canActOn(p.channel, p.threadTs)) return { lines: [] };
       const lines = await formatThreadHistorySinceLastBotPost(app.client, p.channel, p.threadTs, p.excludeTs, botUserId);
       return { lines };
     });
@@ -238,25 +281,28 @@ async function runServer(): Promise<void> {
 
 function runTokenCli(argv: string[]): void {
   const tokenStore = new TokenStore(tokenStorePath());
-  const [cmd, arg] = argv;
+  const [cmd, name, ownerUserId] = argv;
   switch (cmd) {
     case "issue": {
-      if (!arg) throw new Error("usage: token issue <name>");
-      const issued = tokenStore.issue(arg);
-      console.log(`Issued token for "${arg}":`);
+      if (!name || !ownerUserId) throw new Error("usage: token issue <name> <ownerUserId>");
+      const issued = tokenStore.issue(name, ownerUserId);
+      console.log(`Issued token for "${name}" (owner ${ownerUserId}):`);
       console.log(issued.token);
-      console.log("\nSet this as CCTAG_SPOKE_TOKEN in that person's spoke .env file.");
+      console.log(
+        "\nSet this as CCTAG_SPOKE_TOKEN, and set CCTAG_OWNER_USER_ID to the same " +
+          `${ownerUserId}, in that person's spoke .env file.`,
+      );
       return;
     }
     case "revoke": {
-      if (!arg) throw new Error("usage: token revoke <name>");
-      const removed = tokenStore.revoke(arg);
-      console.log(removed ? `Revoked token(s) for "${arg}".` : `No token found for "${arg}".`);
+      if (!name) throw new Error("usage: token revoke <name>");
+      const removed = tokenStore.revoke(name);
+      console.log(removed ? `Revoked token(s) for "${name}".` : `No token found for "${name}".`);
       return;
     }
     case "list": {
       for (const t of tokenStore.list()) {
-        console.log(`${t.name}\tissued ${t.issuedAt}\t${t.token}`);
+        console.log(`${t.name}\towner ${t.ownerUserId}\tissued ${t.issuedAt}\t${t.token}`);
       }
       return;
     }

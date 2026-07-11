@@ -10,10 +10,8 @@ import { BackgroundWatcher } from "../watcher.js";
 import { WsRpc } from "../ws/rpc.js";
 import { WsNotifier } from "./notifier.js";
 
-function wsUrlFor(hubUrl: string, token: string): string {
-  const url = new URL(hubUrl.replace(/\/+$/, "") + "/spoke");
-  url.searchParams.set("token", token);
-  return url.toString();
+function wsUrlFor(hubUrl: string): string {
+  return hubUrl.replace(/\/+$/, "") + "/spoke";
 }
 
 /**
@@ -33,7 +31,11 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
   const pairingStore = new PairingStore(pairingStorePathFor(config.hubUrl));
 
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrlFor(config.hubUrl, config.spokeToken));
+    // Sent as a header rather than a URL query param — query strings
+    // routinely end up in reverse-proxy/HTTP access logs.
+    const ws = new WebSocket(wsUrlFor(config.hubUrl), {
+      headers: { authorization: `Bearer ${config.spokeToken}` },
+    });
 
     ws.on("open", async () => {
       const rpc = new WsRpc(ws);
@@ -91,10 +93,16 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       });
 
       try {
-        await rpc.call("register", {
+        const result = await rpc.call<{ ok: boolean }>("register", {
           ownerUserId: config.ownerUserId,
           pairings: pairingStore.list().map((p) => ({ channel: p.channel, threadTs: p.threadTs })),
         });
+        if (!result.ok) {
+          throw new Error(
+            "Hub rejected registration — this token is not authorized for CCTAG_OWNER_USER_ID " +
+              `${config.ownerUserId}. Check that the token and owner ID were issued together.`,
+          );
+        }
         console.log("[spoke] registered with hub");
       } catch (err) {
         reject(err);
