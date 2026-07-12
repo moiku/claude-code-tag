@@ -22,6 +22,50 @@ keystroke injection, and status detection all go through the `herdr` CLI.
 Turn output is read from Claude Code's own structured JSONL transcripts, not
 parsed off the screen.
 
+## What this actually looks like in use
+
+### One shared session, more than one person driving it
+
+Pairing a thread to a Claude Code session doesn't restrict who can talk to
+it — anyone in that thread can. In practice this means two people with
+different expertise can both instruct the *same* session directly, instead
+of one of them acting as a manual relay between the other and the AI: a
+domain specialist asks it to work through a domain question, an engineer
+asks it a separate implementation question in the same thread, and the
+session picks up context from both without either person needing to
+translate for the other.
+
+The same shape shows up outside research, too. A common failure mode for
+deploying an AI coding agent with a client is needing one person who's
+simultaneously good at customer discovery *and* good at engineering — a
+high bar, close to what people mean by "Forward Deployed Engineer." Letting
+a customer-facing person and an engineer both drive one shared session
+lowers that bar: the customer-facing person runs the discovery
+conversation, the engineer handles anything that needs deeper technical
+judgment, and — because the customer-facing person is present for and
+gradually absorbs the technical exchange rather than receiving it
+secondhand — the split isn't static. Over repeated use they typically pick
+up enough fluency to drive routine work themselves, and the engineer's
+role narrows toward the critical moments that still need it.
+
+### Claude Tag for discussion, cctag for the work itself
+
+If you also use [Claude Tag](https://www.anthropic.com/news/introducing-claude-tag)
+(Anthropic's own Slack bot), the two pair naturally rather than overlap.
+Claude Tag starts with zero memory every time, but a shared GitHub repo
+gives it continuity anyway: point it at a repo's existing docs to pick up
+prior context, and have it push a summary of a discussion's conclusions
+back before the thread ends. cctag then picks up from there for anything
+that's long-running, resource-heavy, or needs your own machine's tools and
+files rather than a sandbox.
+
+cctag doesn't try to absorb what Claude Tag does, deliberately — they sit
+at different points in the same workflow. A casual, exploratory discussion
+(a "seminar") and a long real execution run (a "production job") are
+different modes and probably shouldn't share an environment; keeping them
+as two tools connected through an ordinary GitHub repo, rather than one
+tool trying to do both, is the point, not a gap to close.
+
 ## Status
 
 **v0.1.** Text-in / text-out turns work end-to-end. Multiple-choice prompts
