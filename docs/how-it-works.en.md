@@ -13,7 +13,7 @@ your own machine.**
 
 Anthropic's official "Claude Tag" (`@Claude` in Slack) runs Claude Code in a
 sandbox Anthropic hosts in the cloud. It can't reach your local files or
-network (lab servers, GPUs, mlx-proxy, etc.) directly.
+network (internal servers, GPUs, local model endpoints, etc.) directly.
 
 cctag does the opposite: it remote-controls **a Claude Code instance you
 are actually running on your own PC right now**. Start `claude` in your
@@ -37,11 +37,11 @@ roles.
 
 | | Role | Runs on | Can do |
 |---|---|---|---|
-| **Hub** | The one connection to Slack | The lab's OCI server (`cctag.example.com`) | Receives Slack messages and forwards them to the right person's Spoke. **Never touches Claude Code or herdr itself** |
+| **Hub** | The one connection to Slack | A small always-on server (e.g. a small cloud VM) | Receives Slack messages and forwards them to the right person's Spoke. **Never touches Claude Code or herdr itself** |
 | **Spoke** | The thing that actually drives Claude Code | **Your own PC** | Sends keystrokes into your local Claude Code via herdr, reads its output, and relays it back to Slack through the Hub |
 
 The important part: **the Hub has no way to reach your terminal.** Even if
-the lab server were compromised, it has no ability to control the Claude
+the Hub's server were compromised, it has no ability to control the Claude
 Code running on your machine — only the Spoke running on your own PC can
 actually do that. So anyone who wants to control their own PC's Claude Code
 from Slack needs to have **their own Spoke running on their own PC**.
@@ -70,9 +70,9 @@ Code itself has told herdr "I'm running here."** Claude Code has a
 "session ID xxx is running in this pane." Only once that report arrives
 does the pane get listed as an "agent."
 
-Checked live on the Mac Studio: of the 16 panes herdr was managing, only 6
-had Claude Code running and self-reporting. The other 10 (plain shells,
-etc.) show up in `herdr pane list` but never in `herdr agent list`.
+So even when herdr is managing many panes, `herdr agent list` shows only
+the ones where Claude Code is running and self-reporting. The rest (plain
+shells, etc.) show up in `herdr pane list` but never in `herdr agent list`.
 
 ### What actually makes cctag safe is choosing not to use that raw power
 
