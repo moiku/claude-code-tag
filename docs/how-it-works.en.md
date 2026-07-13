@@ -172,13 +172,13 @@ mid-flight at the terminal. Once handed off, `watcher.ts` stops tracking it
 (removed from `this.watches`); when it finishes, `TurnEngine` removes it
 from `turns`, and the next poll cycle re-baselines it as a fresh pairing.
 
-## 5.6 Switching model or mode
+## 5.6 Switching model
 
-`@cctag model <name>` (e.g. `model opus`) and `@cctag plan` are handled by a
-separate path from a normal conversational turn. They just forward Claude
-Code's own slash commands (`/model <name>`, `/plan`) as-is, and aren't
-treated as a `TurnEngine` turn (their output doesn't reliably land in the
-session transcript the way an LLM reply does).
+`@cctag model <name>` (e.g. `model opus`) is handled by a separate path
+from a normal conversational turn. It just forwards Claude Code's own slash
+command (`/model <name>`) as-is, and isn't treated as a `TurnEngine` turn
+(its output doesn't reliably land in the session transcript the way an LLM
+reply does).
 
 Instead, `commands.ts`'s `runTuiCommand()`:
 
@@ -202,6 +202,58 @@ separator/padding right above that (`stripFooterChrome()`).
 tracking, so these TUI commands are treated as "busy" the same way an
 active turn is — this keeps the background watcher (section 5.5) from
 trying to watch the same instance a TUI command is currently driving.
+
+## 5.6.1 Switching mode (the four Shift+Tab modes)
+
+`@cctag mode <name>` (`manual` / `accept-edits` / `plan` / `auto`) works
+differently from switching model. These four modes have **no slash
+command** — the only way to change them in Claude Code is cycling with
+Shift+Tab. And herdr's `pane send-keys shift+tab`, though accepted,
+**delivers nothing Claude Code reacts to**. Empirically, sending the raw
+CSI Z sequence (`\x1b[Z`, backtab) via `pane send-text` does work — exposed
+as `HerdrClient.paneSendText()`.
+
+`runModeCommand()` matches the mode with a closed loop: read the current
+mode off the footer status line (`⏸ manual mode on` / `⏵⏵ accept edits on` /
+`⏸ plan mode on` / `⏵⏵ auto mode on`), and while it differs from the target,
+send one CSI Z and re-read — repeating until it matches. Because it checks
+after each press rather than computing a press count up front, it's robust
+to the ring order or footer wording changing across versions. Two
+safeguards: (1) if the current mode can't be read, it refuses to cycle
+(there'd be no way to know where it landed), and (2) it presses at most one
+full ring, so an unavailable target leaves the mode back where it started
+rather than somewhere unpredictable. `@cctag plan` is shorthand for `mode
+plan`.
+
+## 5.6.2 Plan Mode over Slack
+
+When a plan-mode turn finishes, Claude Code shows a "Here is Claude's plan /
+ready to execute?" approval prompt (a kind of permission menu). On detecting
+it, cctag:
+
+- **attaches the full plan as a `.md` file**. The plan is written to
+  `~/.claude/plans/<slug>.md`, and its path shows in the footer — but a
+  narrow pane wraps and truncates that path, so the parsed path is only a
+  hint: if it doesn't resolve to an existing file, cctag falls back to the
+  **most-recently-modified file** in the plans directory (which Claude Code
+  writes right before the prompt) — see `resolvePlanFile()`;
+- posts **approval buttons** (proceed / proceed with auto mode);
+- lets you **reply with changes in the thread**. The approval menu has a
+  "Tell Claude what to change" free-text option; a plain thread reply is fed
+  into it (move the cursor to that option's number, type the feedback,
+  Enter), which regenerates the plan and stays in plan mode — so you can
+  refine the plan from Slack before any code runs (`answerPlanFeedback()`).
+
+Whether a prompt is a plan-approval prompt is decided by scanning only the
+**active prompt region** — from the bottom-most cursor line down — for the
+"Tell Claude what to change" marker. That way it (1) doesn't miss the option
+when a narrow pane wraps an earlier option's label and cuts
+`parsePermissionMenu`'s consecutive-number scan short, and (2) doesn't
+misfire on the same line left in scrollback by an earlier, already-resolved
+plan prompt (which sits above the current cursor). The "Tell Claude what to
+change" option itself isn't rendered as a button — pressing its number only
+moves the cursor without confirming, so changes are taken via free-text
+reply instead.
 
 ## 5.7 Catching up on messages cctag wasn't mentioned in
 

@@ -132,7 +132,8 @@ bot:
 | `@cctag status` | anyone | Shows the paired instance and its live status |
 | `@cctag list` | anyone | Lists all running agents and which are paired |
 | `@cctag model <name>` | anyone (in a paired thread) | Runs `/model <name>` in the paired session (e.g. `model opus`, `model sonnet`) |
-| `@cctag plan` | anyone (in a paired thread) | Runs `/plan` in the paired session, enabling Plan Mode |
+| `@cctag mode <name>` | anyone (in a paired thread) | Switches the Shift+Tab mode: `manual` / `accept-edits` / `plan` / `auto` |
+| `@cctag plan` | anyone (in a paired thread) | Enables Plan Mode (same as `mode plan`) |
 | `@cctag log [instruction]` | anyone (in a paired thread) | Feeds thread messages since cctag's last post (not just @cctag mentions) into the paired session, optionally with an instruction |
 | `@cctag <anything else>` | anyone (in a paired thread) | Sends the text into the paired Claude Code session; its reply is posted back in the thread |
 
@@ -152,17 +153,42 @@ thread:
   button per choice, first option styled primary, anything that looks like a
   refusal ("No", "Cancel", "拒否") styled as a danger button.
 
-### Switching model or mode
+### Switching model
 
-`@cctag model <name>` and `@cctag plan` run the corresponding Claude Code
-slash command (`/model <name>`, `/plan`) directly, rather than starting a
-conversational turn — the reply is the command's own output (e.g. "Set
-model to Opus and saved as your default for new sessions"), read straight
-off the terminal screen. If switching models mid-conversation triggers a
-confirmation menu ("Switch model? Yes/No"), it's auto-confirmed, since
-asking for the switch already expressed that intent. These commands are
-blocked while a normal turn (or another TUI command) is in progress on the
+`@cctag model <name>` runs Claude Code's `/model <name>` slash command
+directly, rather than starting a conversational turn — the reply is the
+command's own output (e.g. "Set model to Opus and saved as your default for
+new sessions"), read straight off the terminal screen. If switching models
+mid-conversation triggers a confirmation menu ("Switch model? Yes/No"),
+it's auto-confirmed, since asking for the switch already expressed that
+intent.
+
+### Switching mode
+
+`@cctag mode <name>` selects one of Claude Code's four Shift+Tab modes —
+`manual`, `accept-edits`, `plan`, `auto`. There's no slash command for
+these; the only control is cycling with Shift+Tab, so cctag reads the
+current mode off the terminal footer and cycles one press at a time until
+it reaches the target (a raw backtab control sequence — herdr's plain
+`send-keys shift+tab` doesn't register with Claude Code). If the target
+isn't reachable (not present in that Claude Code build), it reports so and
+leaves the mode exactly where it started. `@cctag plan` is a shorthand for
+`mode plan`. These commands are blocked while a turn is in progress on the
 same instance.
+
+### Plan Mode over Slack
+
+When a plan-mode turn finishes and Claude Code shows its "ready to code?"
+approval prompt, cctag:
+
+- **attaches the plan** to the thread as a downloadable `.md` file (read
+  from `~/.claude/plans/`), on top of the approval buttons, so the full
+  plan is readable even where the terminal render is line-wrapped;
+- lets you **approve with a button** (proceed / proceed + auto-accept), or
+- lets you **reply with changes in the thread** — a plain reply is routed
+  into Claude Code's "tell it what to change" path, which refines the plan
+  and stays in plan mode, so you can iterate on the plan from Slack before
+  any code runs.
 
 ### Catching up on thread activity cctag wasn't mentioned in
 
