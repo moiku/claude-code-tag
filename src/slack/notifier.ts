@@ -46,6 +46,22 @@ export class SlackNotifier implements Notifier {
   async getThreadHistorySinceLastBotPost(channel: string, threadTs: string, excludeTs: string): Promise<string[]> {
     return formatThreadHistorySinceLastBotPost(this.client, channel, threadTs, excludeTs, await this.getBotUserId());
   }
+
+  async uploadTextFile(
+    channel: string,
+    threadTs: string,
+    args: { content: string; filename: string; title?: string; comment?: string },
+  ): Promise<void> {
+    const common = {
+      content: args.content,
+      filename: args.filename,
+      title: args.title,
+      initial_comment: args.comment,
+    };
+    await this.client.files.uploadV2(
+      threadTs ? { channel_id: channel, thread_ts: threadTs, ...common } : { channel_id: channel, ...common },
+    );
+  }
 }
 
 interface RepliesMessage {

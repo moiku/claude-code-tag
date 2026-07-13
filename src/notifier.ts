@@ -27,4 +27,15 @@ export interface Notifier {
    * command to catch cctag up on conversation it wasn't mentioned in.
    */
   getThreadHistorySinceLastBotPost?(channel: string, threadTs: string, excludeTs: string): Promise<string[]>;
+  /**
+   * Uploads a file to the thread. `content` is the file's text (plans are
+   * markdown), `filename` its display name, `title`/`comment` optional. Used
+   * to attach a plan-mode plan file. In Hub–Spoke mode the content travels
+   * over the WebSocket to the Hub, which holds the real Slack client.
+   */
+  uploadTextFile?(
+    channel: string,
+    threadTs: string,
+    args: { content: string; filename: string; title?: string; comment?: string },
+  ): Promise<void>;
 }

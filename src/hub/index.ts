@@ -188,6 +188,19 @@ async function runServer(): Promise<void> {
       return { lines };
     });
 
+    rpc.onCall("upload_text_file", async (payload) => {
+      const p = payload as { channel: string; threadTs: string; content: string; filename: string; title?: string; comment?: string };
+      if (!canActOn(p.channel, p.threadTs)) {
+        console.error(`[hub] rejected upload_text_file from ${issued.name}: not authorized for ${p.channel}:${p.threadTs}`);
+        return {};
+      }
+      const common = { content: p.content, filename: p.filename, title: p.title, initial_comment: p.comment };
+      await app.client.files.uploadV2(
+        p.threadTs ? { channel_id: p.channel, thread_ts: p.threadTs, ...common } : { channel_id: p.channel, ...common },
+      );
+      return {};
+    });
+
     ws.on("close", () => {
       if (registeredOwnerId && spokesByOwner.get(registeredOwnerId) === rpc) {
         spokesByOwner.delete(registeredOwnerId);

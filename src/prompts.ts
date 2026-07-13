@@ -138,6 +138,100 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
   return { header, question, options, multiSelect };
 }
 
+/**
+ * The four permission/plan modes Claude Code cycles through with Shift+Tab,
+ * in ring order (each Shift+Tab advances to the next; wraps around). The
+ * `footer` regexes match the mode-status line at the very bottom of the TUI
+ * (e.g. "⏸ plan mode on (shift+tab to cycle)", "⏵⏵ accept edits on ...").
+ */
+export type CctagMode = "manual" | "accept-edits" | "plan" | "auto";
+
+export const MODE_RING: readonly CctagMode[] = ["manual", "accept-edits", "plan", "auto"];
+
+const MODE_FOOTER_RE: Record<CctagMode, RegExp> = {
+  manual: /manual mode on/i,
+  "accept-edits": /accept edits on/i,
+  plan: /plan mode on/i,
+  auto: /auto mode on/i,
+};
+
+/** The names accepted from Slack (`@cctag mode <name>`), mapped to CctagMode. */
+export const MODE_ALIASES: Record<string, CctagMode> = {
+  manual: "manual",
+  normal: "manual",
+  default: "manual",
+  "accept-edits": "accept-edits",
+  acceptedits: "accept-edits",
+  accept: "accept-edits",
+  edits: "accept-edits",
+  plan: "plan",
+  auto: "auto",
+};
+
+/** Reads the current mode off the pane footer, or null if none matches. */
+export function parseCurrentMode(paneText: string): CctagMode | null {
+  // Scan from the bottom — the mode line is the last non-blank footer line.
+  const lines = paneText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    for (const mode of MODE_RING) {
+      if (MODE_FOOTER_RE[mode].test(line)) return mode;
+    }
+  }
+  return null;
+}
+
+/**
+ * Claude Code's ExitPlanMode approval prompt prints the plan's file path in
+ * its footer, e.g. "ctrl+g to edit in Vim · ~/.claude/plans/<slug>.md".
+ * Returns the path of the *current* prompt — the bottom-most match, since a
+ * pane read includes scrollback and an already-resolved plan prompt's path
+ * may still be present higher up. Returns null if none.
+ */
+const PLAN_PATH_RE = /(~?\/[^\s·]*\/plans\/[^\s·]+\.md)/;
+
+export function parsePlanFilePath(paneText: string): string | null {
+  const lines = paneText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = PLAN_PATH_RE.exec(lines[i]);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+const TELL_CLAUDE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*Tell Claude what to change/;
+
+/**
+ * The ExitPlanMode approval prompt is distinguished from an ordinary
+ * tool-permission menu by its "Tell Claude what to change" free-text option.
+ * Returns that option's number, or null.
+ *
+ * Scans only the *active* prompt region — from the bottom-most `❯`-cursor
+ * line to the end of the pane — for two reasons: (1) a "Tell Claude what to
+ * change" line left in scrollback by an earlier, already-resolved plan
+ * prompt sits above the current cursor and is thus excluded, so it can't
+ * misclassify a later ordinary permission prompt; (2) it doesn't rely on
+ * parsePermissionMenu's strict consecutive-numbered scan, which a narrow
+ * pane can cut short when an earlier option's label wraps onto a second
+ * line — dropping option 4 before it's reached.
+ */
+export function findPlanFeedbackOption(paneText: string): number | null {
+  const lines = paneText.split("\n");
+  let cursorIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (CURSOR_LINE_RE.test(lines[i])) {
+      cursorIdx = i;
+      break;
+    }
+  }
+  const from = cursorIdx === -1 ? 0 : cursorIdx;
+  for (let i = from; i < lines.length; i++) {
+    const m = TELL_CLAUDE_RE.exec(lines[i]);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
 const DANGER_WORDS_RE = /\b(rm\s+-rf|sudo|--force|DROP\s+TABLE)\b/i;
 const REFUSAL_LABEL_RE = /no|cancel|拒否|キャンセル|don'?t/i;
 

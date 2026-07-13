@@ -118,9 +118,9 @@ interface PermButtonValue {
   n: string;
 }
 
-export function permissionBlocks(terminalId: string, promptId: number, menu: PermissionMenu) {
+export function permissionBlocks(terminalId: string, promptId: number, menu: PermissionMenu, headerOverride?: string) {
   const danger = isDangerousSnippet(menu.snippet);
-  const header = danger ? "🚨 許可リクエスト（危険な可能性）" : "⚠️ 許可リクエスト";
+  const header = headerOverride ?? (danger ? "🚨 許可リクエスト（危険な可能性）" : "⚠️ 許可リクエスト");
   const blocks: unknown[] = [
     { type: "section", text: { type: "mrkdwn", text: `*${header}*` } },
     { type: "section", text: { type: "mrkdwn", text: "```\n" + menu.snippet.slice(0, 2900) + "\n```" } },

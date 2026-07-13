@@ -27,4 +27,12 @@ export class WsNotifier implements Notifier {
     const { lines } = await this.rpc.call<{ lines: string[] }>("get_thread_history", { channel, threadTs, excludeTs });
     return lines;
   }
+
+  async uploadTextFile(
+    channel: string,
+    threadTs: string,
+    args: { content: string; filename: string; title?: string; comment?: string },
+  ): Promise<void> {
+    await this.rpc.call("upload_text_file", { channel, threadTs, ...args });
+  }
 }

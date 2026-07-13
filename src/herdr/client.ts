@@ -94,6 +94,18 @@ export class HerdrClient {
     await this.runRaw(["pane", "send-keys", paneId, ...keys]);
   }
 
+  /**
+   * Writes literal text straight to the pane's PTY (`pane send-text`). Used
+   * for control sequences that `send-keys` can't express: notably Shift+Tab
+   * (backtab), which Claude Code cycles its permission/plan/auto mode with.
+   * `send-keys shift+tab` is accepted by herdr but delivers nothing Claude
+   * Code reacts to; the raw CSI Z sequence ("\x1b[Z") sent as text does work
+   * (verified empirically). Prints nothing on success — don't JSON-parse it.
+   */
+  async paneSendText(paneId: string, text: string): Promise<void> {
+    await this.runRaw(["pane", "send-text", paneId, text]);
+  }
+
   async paneRead(
     paneId: string,
     opts: { source?: "visible" | "recent" | "recent-unwrapped"; lines?: number } = {},

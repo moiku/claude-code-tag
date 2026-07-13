@@ -3,11 +3,14 @@ import { PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
 import { agentPickerBlocks } from "./slack/blocks.js";
-import { parsePermissionMenu } from "./prompts.js";
+import { MODE_ALIASES, MODE_RING, parseCurrentMode, parsePermissionMenu, type CctagMode } from "./prompts.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Shift+Tab (backtab) as a raw terminal control sequence — see HerdrClient.paneSendText. */
+const BACKTAB = "\x1b[Z";
 
 const HELP_TEXT = [
   "*cctag の使い方*",
@@ -16,12 +19,14 @@ const HELP_TEXT = [
   "• `@cctag status` — 接続状態を表示",
   "• `@cctag list` — 稼働中のインスタンス一覧",
   "• `@cctag model <name>` — Claude Code のモデルを切り替え（例: `model opus`）",
-  "• `@cctag plan` — Plan Mode を有効化",
+  "• `@cctag mode <name>` — モードを切り替え（`manual` / `accept-edits` / `plan` / `auto`）",
+  "• `@cctag plan` — Plan Mode を有効化（`mode plan` と同じ）",
   "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
 ].join("\n");
 
 const MODEL_COMMAND_RE = /^model\s+(\S+)$/i;
+const MODE_COMMAND_RE = /^mode\s+(\S+)$/i;
 const LOG_COMMAND_RE = /^log(?:\s+([\s\S]+))?$/i;
 
 /**
@@ -135,6 +140,30 @@ export class CommandHandler {
       return;
     }
 
+    const modeMatch = MODE_COMMAND_RE.exec(text);
+    if (modeMatch) {
+      const pairing = this.pairingStore.get(channel, threadTs);
+      if (!pairing) {
+        await this.notifier.postReply(
+          channel,
+          threadTs,
+          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+        );
+        return;
+      }
+      const target = MODE_ALIASES[modeMatch[1].toLowerCase()];
+      if (!target) {
+        await this.notifier.postReply(
+          channel,
+          threadTs,
+          `⚠️ 不明なモード「${modeMatch[1]}」。使えるのは: ${MODE_RING.join(" / ")}`,
+        );
+        return;
+      }
+      await this.runModeCommand(channel, threadTs, pairing.terminalId, target);
+      return;
+    }
+
     const logMatch = LOG_COMMAND_RE.exec(text);
     if (logMatch) {
       await this.handleLog(channel, threadTs, userId, ts, logMatch[1]?.trim());
@@ -152,7 +181,10 @@ export class CommandHandler {
           );
           return;
         }
-        await this.runTuiCommand(channel, threadTs, pairing.terminalId, "/plan");
+        // `plan` is just `mode plan` — cycle to plan mode via Shift+Tab
+        // rather than the `/plan` slash command, so all four modes share
+        // one reliable mechanism.
+        await this.runModeCommand(channel, threadTs, pairing.terminalId, "plan");
         return;
       }
       case "connect": {
@@ -296,6 +328,65 @@ export class CommandHandler {
   }
 
   /**
+   * `@cctag mode <name>` — switches the paired session to one of Claude
+   * Code's four Shift+Tab modes (manual / accept-edits / plan / auto).
+   * There's no slash command for these, so this reads the current mode off
+   * the pane footer and cycles Shift+Tab (a raw backtab control sequence via
+   * pane send-text; herdr's `send-keys shift+tab` is a no-op here) one press
+   * at a time, re-reading after each, until the footer shows the target.
+   * Closed-loop rather than a computed press count, so it's robust to the
+   * ring order or footer wording differing across Claude Code versions.
+   */
+  private async runModeCommand(channel: string, threadTs: string, terminalId: string, target: CctagMode): Promise<void> {
+    if (this.turnEngine.isBusy(terminalId)) {
+      await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+      return;
+    }
+    const agent = await this.herdr.agentGet(terminalId);
+    if (!agent) {
+      await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+      return;
+    }
+
+    this.turnEngine.markBusy(terminalId);
+    try {
+      let current = parseCurrentMode(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
+      if (current === null) {
+        // Don't blind-cycle from an unknown state — pressing Shift+Tab would
+        // change the mode with no way to know to what, or to restore it.
+        await this.notifier.postReply(channel, threadTs, "⚠️ 現在のモードを判別できませんでした（切り替えは行っていません）。");
+        return;
+      }
+      if (current === target) {
+        await this.notifier.postReply(channel, threadTs, `✅ 既にモードは「${target}」です。`);
+        return;
+      }
+
+      // Press at most one full ring. A full cycle lands back on the starting
+      // mode, so if the target isn't reachable (not in this Claude Code
+      // build) we end up exactly where we began rather than in some other
+      // mode while reporting failure.
+      for (let i = 0; i < MODE_RING.length && current !== target; i++) {
+        await this.herdr.paneSendText(agent.paneId, BACKTAB);
+        await sleep(400);
+        current = parseCurrentMode(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
+      }
+
+      if (current === target) {
+        await this.notifier.postReply(channel, threadTs, `✅ モードを「${target}」に切り替えました。`);
+      } else {
+        await this.notifier.postReply(
+          channel,
+          threadTs,
+          `⚠️ モード「${target}」に切り替えられませんでした（このバージョンの Claude Code には無い可能性があります）。元のモードに戻しました。現在: ${current ?? "不明"}`,
+        );
+      }
+    } finally {
+      this.turnEngine.clearBusy(terminalId);
+    }
+  }
+
+  /**
    * `@cctag log [instruction]` — catches the paired instance up on thread
    * conversation it wasn't mentioned in (e.g. a review posted by another
    * Slack bot/human), scoped to messages posted after cctag's own last
@@ -420,11 +511,18 @@ export class CommandHandler {
     }
   }
 
-  /** Free-text answer to a pending AskUserQuestion (no mention needed). Silently a no-op if nothing is pending. */
+  /**
+   * Free-text answer to a pending prompt (no mention needed). Tries an
+   * AskUserQuestion answer first; if nothing's pending there, tries routing
+   * it as ExitPlanMode feedback ("Tell Claude what to change"). Silently a
+   * no-op if neither is pending.
+   */
   async handleFreeTextMessage(ctx: FreeTextContext): Promise<void> {
     const pairing = this.pairingStore.get(ctx.channel, ctx.threadTs);
     if (!pairing) return;
-    await this.turnEngine.answerQuestionFreeText(pairing.terminalId, ctx.text);
+    const asQuestion = await this.turnEngine.answerQuestionFreeText(pairing.terminalId, ctx.text);
+    if (asQuestion.ok) return;
+    await this.turnEngine.answerPlanFeedback(pairing.terminalId, ctx.text);
   }
 }
 

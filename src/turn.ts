@@ -10,10 +10,24 @@ import {
   permissionBlocks,
   permissionParseFailureBlocks,
 } from "./slack/blocks.js";
-import { parseAskUserQuestionPane, parsePermissionMenu, type AskUserQuestionPaneInfo } from "./prompts.js";
+import {
+  findPlanFeedbackOption,
+  parseAskUserQuestionPane,
+  parsePermissionMenu,
+  parsePlanFilePath,
+  type AskUserQuestionPaneInfo,
+} from "./prompts.js";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Expands a leading ~ to the user's home directory. */
+function expandHome(p: string): string {
+  return p.startsWith("~/") || p === "~" ? p.replace(/^~/, homedir()) : p;
 }
 
 export type TurnPhase = "running" | "awaiting-question" | "awaiting-permission";
@@ -39,6 +53,12 @@ interface TurnState {
   currentPromptId: number;
   promptHandle?: MessageHandle;
   pendingQuestionInfo?: AskUserQuestionPaneInfo;
+  // Set when the current awaiting-permission prompt is Claude Code's
+  // ExitPlanMode approval, which uniquely offers a "Tell Claude what to
+  // change" free-text option — recorded so a plain thread reply can be
+  // routed to it (refine the plan, stay in plan mode) instead of being
+  // ignored the way free-text is for ordinary permission menus.
+  planFeedbackOptionNum?: number;
 }
 
 export interface TurnEngineOptions {
@@ -263,6 +283,33 @@ export class TurnEngine {
     await this.herdr.agentSend(terminalId, num);
     await state.promptHandle?.update(`→ ${num} を送信しました`, []).catch(() => {});
     state.promptHandle = undefined;
+    state.planFeedbackOptionNum = undefined;
+    state.phase = "running";
+    return { ok: true };
+  }
+
+  /**
+   * Free-text reply to an ExitPlanMode approval prompt: routes the text into
+   * Claude Code's "Tell Claude what to change" option (verified mechanics:
+   * send the option's digit to move the cursor there, type the feedback —
+   * which replaces the option's placeholder label inline — then Enter, which
+   * refines the plan and stays in plan mode). Only valid while the current
+   * awaiting-permission prompt actually offered that option.
+   */
+  async answerPlanFeedback(terminalId: string, freeText: string): Promise<AnswerResult> {
+    const state = this.turns.get(terminalId);
+    if (!state || state.phase !== "awaiting-permission" || state.planFeedbackOptionNum === undefined) {
+      return { ok: false, reason: "not-pending" };
+    }
+    await this.herdr.agentSend(terminalId, String(state.planFeedbackOptionNum));
+    await sleep(200);
+    await this.herdr.agentSend(terminalId, freeText);
+    await sleep(200);
+    await this.herdr.paneSendKeys(state.paneId, "Enter");
+
+    await state.promptHandle?.update(`→ 修正を依頼しました: ${freeText}`, []).catch(() => {});
+    state.promptHandle = undefined;
+    state.planFeedbackOptionNum = undefined;
     state.phase = "running";
     return { ok: true };
   }
@@ -341,12 +388,43 @@ export class TurnEngine {
             state.phase = "awaiting-question";
           } else {
             const menu = parsePermissionMenu(paneText);
+            // Is this the ExitPlanMode approval (plan mode finished, awaiting
+            // go-ahead)? Detect it from the *parsed menu's* choices (the
+            // active menu parsePermissionMenu isolated), not the raw pane —
+            // otherwise a "Tell Claude what to change" line left in scrollback
+            // by an earlier resolved plan prompt could misclassify a later
+            // ordinary permission prompt. The plan path is likewise the
+            // bottom-most match. If so, attach the plan file and remember the
+            // feedback option so a free-text reply can refine the plan.
+            const feedbackNum = findPlanFeedbackOption(paneText);
+            const isPlanPrompt = feedbackNum !== null;
+            state.planFeedbackOptionNum = feedbackNum ?? undefined;
+
+            if (isPlanPrompt && this.notifier.uploadTextFile) {
+              await this.attachPlanFile(state, paneText).catch((err) =>
+                console.error(`[turn ${terminalId}] plan file attach failed:`, err),
+              );
+            }
+
+            // Drop the "Tell Claude what to change" option from the buttons:
+            // its digit only moves the cursor, it doesn't confirm (it expects
+            // typed feedback next), so a button for it would be a dead end.
+            // That path is handled by a free-text thread reply instead
+            // (answerPlanFeedback), which the header points the user to.
+            const buttonMenu =
+              menu && feedbackNum !== null
+                ? { ...menu, choices: menu.choices.filter((c) => c.num !== String(feedbackNum)) }
+                : menu;
+
+            const header = isPlanPrompt
+              ? "📋 プランが提示されました。ボタンで承認するか、修正内容をこのスレッドに返信してください。"
+              : "⚠️ 許可リクエスト";
             state.promptHandle = await this.notifier.postMessage(
               state.pairing.channel,
               state.pairing.threadTs ?? "",
-              "⚠️ 許可リクエスト",
-              menu
-                ? permissionBlocks(terminalId, state.currentPromptId, menu)
+              header,
+              buttonMenu
+                ? permissionBlocks(terminalId, state.currentPromptId, buttonMenu, isPlanPrompt ? header : undefined)
                 : permissionParseFailureBlocks(terminalId, state.currentPromptId, paneText),
             );
             state.phase = "awaiting-permission";
@@ -365,6 +443,7 @@ export class TurnEngine {
           state.promptHandle = undefined;
         }
         state.pendingQuestionInfo = undefined;
+        state.planFeedbackOptionNum = undefined;
         state.phase = "running";
       }
 
@@ -394,5 +473,52 @@ export class TurnEngine {
     }
     const label = text ? doneStatusText(elapsed, state.toolCounts) : `✅ 完了 (${elapsed}s)（テキスト応答なし）`;
     await state.statusHandle.update(label).catch(() => {});
+  }
+
+  /**
+   * Reads the plan markdown Claude Code wrote to ~/.claude/plans/<slug>.md
+   * and uploads it to the thread, so the full plan is available as a
+   * downloadable file rather than only rendered (line-wrapped) in the pane.
+   *
+   * The path shown in the pane footer gets truncated when the pane is narrow
+   * (the .md suffix can be cut off), so the pane-parsed path is only a
+   * preferred hint: if it doesn't parse to an existing file, fall back to the
+   * most-recently-modified plan file, which Claude Code writes immediately
+   * before showing the approval prompt.
+   */
+  private async attachPlanFile(state: TurnState, paneText: string): Promise<void> {
+    if (!this.notifier.uploadTextFile) return;
+    const abs = this.resolvePlanFile(paneText);
+    if (!abs) return;
+    const content = readFileSync(abs, "utf8");
+    if (!content.trim()) return;
+    await this.notifier.uploadTextFile(state.pairing.channel, state.pairing.threadTs ?? "", {
+      content,
+      filename: basename(abs),
+      title: "Claude Code のプラン",
+      comment: "📋 プラン全文（.md）",
+    });
+  }
+
+  private resolvePlanFile(paneText: string): string | null {
+    const hinted = parsePlanFilePath(paneText);
+    if (hinted) {
+      const abs = expandHome(hinted);
+      if (existsSync(abs)) return abs;
+    }
+    // Fallback: newest *.md in ~/.claude/plans/.
+    const dir = join(homedir(), ".claude", "plans");
+    try {
+      let newest: { path: string; mtime: number } | null = null;
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith(".md")) continue;
+        const p = join(dir, name);
+        const mtime = statSync(p).mtimeMs;
+        if (!newest || mtime > newest.mtime) newest = { path: p, mtime };
+      }
+      return newest?.path ?? null;
+    } catch {
+      return null;
+    }
   }
 }
