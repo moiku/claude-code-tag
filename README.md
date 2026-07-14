@@ -1,3 +1,7 @@
+🌐 [日本語](README.ja.md) | **English**
+
+---
+
 # cctag
 
 <img src="assets/icon.png" alt="cctag icon" width="120" />
@@ -87,20 +91,78 @@ AskUserQuestion detection quirk, multi-workspace caveats — see
 [docs/how-it-works.md](docs/how-it-works.md) (日本語) /
 [docs/how-it-works.en.md](docs/how-it-works.en.md) (English).
 
+## Two ways to run cctag
+
+- **Standalone** — you create your own Slack app and run everything on one
+  machine. Simplest option if you're the only person using cctag.
+- **Hub–Spoke** — one shared Slack app, one always-on **Hub**, and one
+  lightweight **Spoke** per person. Needed as soon as more than one person
+  wants to use the same `@cctag` bot: Slack's Socket Mode delivers each
+  event to exactly one of an app's open connections, so two people each
+  running a full daemon against the same Slack app token would steal each
+  other's events instead of sharing them. The Hub holds the single Socket
+  Mode connection and only routes events; it never runs or sees anyone's
+  Claude Code session. Each Spoke connects out to the Hub over an
+  authenticated WebSocket and drives that person's own local herdr/Claude
+  Code instances, exactly like standalone mode does.
+
+**If someone else already runs a Hub for your lab/team** (e.g. your
+supervisor), you only need [For Spoke users](#for-spoke-users) below —
+skip straight there, none of the Slack app setup applies to you.
+
 ## Requirements
 
-- [herdr](https://herdr.dev) installed and running, with one or more Claude
-  Code instances started as herdr agents (`herdr agent start <name> --cwd
-  <dir> -- claude`, or any Claude Code instance herdr already tracks).
-- Node.js 20+.
-- A Slack workspace where you can create an app (Socket Mode; no public
-  server or open ports needed).
+- **Node.js 20+** — needed everywhere cctag runs (Hub, Spoke, or standalone).
+- **[herdr](https://herdr.dev)**, installed and running, with your Claude
+  Code instance started as a herdr agent — needed only on machines that
+  actually run Claude Code (standalone setups and every Spoke). A Hub-only
+  machine never runs Claude Code and doesn't need herdr at all.
+- **A Slack workspace where you can create an app** (Socket Mode; no public
+  server or open ports needed) — needed only if you're creating the Slack
+  app yourself (standalone or Hub operator). Spoke users never touch Slack
+  app credentials.
 
-## Setup
+### Installing herdr (macOS notes)
 
-1. **Create the Slack app** from `manifest.yaml`: https://api.slack.com/apps
-   → *Create New App* → *From an app manifest* → paste `manifest.yaml` →
-   pick your workspace.
+Install herdr with **one** method — Homebrew or the [official
+installer](https://herdr.dev) — not both; mixing them leaves two `herdr`
+binaries on `PATH` and makes `CCTAG_HERDR_BIN` ambiguous.
+
+```bash
+brew install herdr
+brew services start herdr   # herdr runs as a background daemon via launchd
+```
+
+Register your Claude Code terminal as a herdr agent — the agent name comes
+*first*, before `--cwd`:
+
+```bash
+herdr agent start <name> --cwd <project-dir> -- claude
+herdr integration install claude
+```
+
+If Node is managed by `nvm`, the launchd-started herdr daemon doesn't
+source `.zshrc`/`.zshenv` and only sees a minimal `PATH`
+(`/usr/bin:/bin:/usr/sbin:/sbin`), so it can't find `claude` or `node`. Pass
+the nvm bin directory explicitly:
+
+```bash
+herdr agent start <name> --cwd <project-dir> \
+  --env PATH="$HOME/.nvm/versions/node/<version>/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  -- claude
+```
+
+Check `herdr agent list` shows your agent as `idle` before continuing.
+
+## For Hub operators
+
+*(Skip this whole section if you're connecting to a Hub someone else
+already runs — see [For Spoke users](#for-spoke-users) instead.)*
+
+### Create the Slack app
+
+1. From `manifest.yaml`: https://api.slack.com/apps → *Create New App* →
+   *From an app manifest* → paste `manifest.yaml` → pick your workspace.
 2. Under **Basic Information → App-Level Tokens**, create a token with the
    `connections:write` scope. This is `SLACK_APP_TOKEN` (`xapp-...`).
 3. **Install the app** to your workspace. Under **OAuth & Permissions**,
@@ -108,17 +170,164 @@ AskUserQuestion detection quirk, multi-workspace caveats — see
 4. (Optional) Under **Basic Information → Display Information**, upload
    `assets/icon-512.png` as the app icon.
 5. Invite the bot to a channel: `/invite @cctag`.
-6. Find your own Slack user ID (three-dot menu on your profile → *Copy
-   member ID*) — this is `CCTAG_OWNER_USER_ID`. Only this user can run
-   `connect`/`disconnect`.
-7. Copy `.env.example` to `.env` and fill in the four values above.
+
+### Running standalone
+
+Find your own Slack user ID (three-dot menu on your profile → *Copy member
+ID*) — this is `CCTAG_OWNER_USER_ID`. Only this user can run
+`connect`/`disconnect`.
 
 ```bash
 cp .env.example .env
-$EDITOR .env
+$EDITOR .env   # SLACK_BOT_TOKEN, SLACK_APP_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HERDR_BIN
 npm install
 npm run dev   # or: npm run build && npm start
 ```
+
+### Running a Hub (for more than one person)
+
+The Hub needs the same `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` as standalone
+mode, plus a public `wss://` endpoint (a domain + TLS in front of it —
+[Caddy](https://caddyserver.com) gets you automatic HTTPS with almost no
+config). A single Oracle Cloud "Always Free" `VM.Standard.E2.1.Micro`
+instance is plenty. This machine does **not** need herdr or Claude Code.
+
+```bash
+git clone https://github.com/moiku/claude-code-tag.git /opt/cctag
+cd /opt/cctag && npm install && npm run build
+cat > .env <<EOF
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+CCTAG_HUB_PORT=8765
+EOF
+```
+
+Point a domain at the box (an A record, DNS-only / not proxied through
+Cloudflare or similar — Caddy needs to complete its own ACME/TLS handshake)
+and give Caddy a one-line `/etc/caddy/Caddyfile`:
+
+```
+your.domain.example {
+	reverse_proxy localhost:8765
+}
+```
+
+Run the Hub under systemd (`ExecStart=/usr/bin/node dist/hub/index.js`,
+`EnvironmentFile=/opt/cctag/.env`) so it survives reboots — see
+`assets/cctag-hub.service` for a template unit file — then `systemctl
+enable --now caddy cctag-hub`.
+
+Issue each person a token from the Hub, bound to their own Slack user ID —
+a token can only ever register as the owner it was issued for, so a leaked
+or misused token can't be used to impersonate someone else's connection
+(but it can still act on that owner's own paired threads, so only hand
+these to people you trust):
+
+```bash
+node dist/hub/index.js token issue <name> <ownerUserId>   # prints a token
+node dist/hub/index.js token list
+node dist/hub/index.js token revoke <name>
+```
+
+Send each person the printed token, the Hub's `wss://` URL, and the
+`ownerUserId` you issued it for — that's everything they need for [For
+Spoke users](#for-spoke-users).
+
+### Bridging a second Slack workspace
+
+A Hub is tied to exactly one Slack app/workspace (its `SLACK_BOT_TOKEN`/
+`SLACK_APP_TOKEN`). To bridge a second workspace, run a second Hub — it
+doesn't need its own machine; a second lightweight process (own port, own
+`.env`, own systemd unit) on the same box is enough.
+
+**Tokens are namespaced per Hub.** If the second Hub is started with
+`CCTAG_ENV_FILE=/opt/cctag/.env.workspace2` pointing at its own `.env`
+(rather than a duplicated checkout), its `token issue`/`list`/`revoke`
+commands also need that same `CCTAG_ENV_FILE` prefix, or they silently
+operate on the *first* Hub's token store instead:
+
+```bash
+CCTAG_ENV_FILE=/opt/cctag/.env.workspace2 node dist/hub/index.js token issue <name> <ownerUserId>
+```
+
+## For Spoke users
+
+*(This is the section for you if someone else already runs a Hub and just
+handed you a token, a Hub URL, and a Slack user ID.)*
+
+You can't generate any of these yourself — get them from your Hub operator:
+
+- `CCTAG_HUB_URL` — the Hub's `wss://...` address
+- `CCTAG_SPOKE_TOKEN` — a token issued specifically for you
+- `CCTAG_OWNER_USER_ID` — your own Slack user ID; must match the ID the
+  token was issued for, or the Hub rejects the connection
+
+Make sure herdr is installed and your Claude Code instance is registered as
+a herdr agent first — see [Installing herdr](#installing-herdr-macos-notes)
+above.
+
+```bash
+git clone https://github.com/moiku/claude-code-tag.git
+cd claude-code-tag
+npm install
+cp .env.example .env
+$EDITOR .env   # CCTAG_HUB_URL, CCTAG_SPOKE_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HERDR_BIN
+npm run build
+npm run start:spoke   # or dev:spoke while iterating
+```
+
+The Spoke reconnects automatically (with backoff) if the connection drops.
+Pairing state lives locally on your machine
+(`~/.cctag/pairings-<hub-url>.json`, namespaced per Hub) — the Hub only
+keeps a lightweight, in-memory "which thread belongs to which Spoke" map,
+rebuilt from what each Spoke reports on connect.
+
+### Connecting to more than one workspace
+
+If your operator runs more than one Hub (e.g. two Slack workspaces), you
+need one Spoke per Hub, each with its own token. Run a second Spoke from
+the same checkout by pointing `CCTAG_ENV_FILE` at a per-instance `.env`
+instead of duplicating the whole directory — `CCTAG_HUB_URL`,
+`CCTAG_SPOKE_TOKEN`, and pairing storage are all kept separate per Hub URL
+automatically:
+
+```bash
+CCTAG_ENV_FILE=/opt/cctag/.env.workspace2 node dist/spoke/index.js
+```
+
+For a persistent second instance, add a second launchd
+`LaunchAgent`/systemd unit whose `EnvironmentVariables`/`Environment` sets
+`CCTAG_ENV_FILE` to that second `.env` file.
+
+Both Spokes on one machine still talk to the **same local herdr daemon**,
+so they see the same pool of Claude Code instances — pairing one workspace
+to a terminal doesn't stop the other workspace's picker from also offering
+it. cctag doesn't guard against this across separate Spoke processes (only
+within one Spoke's own pairings); avoid pairing the same terminal from two
+workspaces at once, or you'll get keystrokes interleaved from both.
+
+### Troubleshooting: "invalid token"
+
+```
+[spoke] disconnected from hub (code 4001: invalid token)
+```
+
+This means the Hub you're connecting to doesn't recognize your token —
+almost always because it was issued somewhere other than the exact Hub
+process you're pointed at (a different machine, or, on a Hub bridging
+multiple workspaces, a different workspace's token store — see [Bridging a
+second Slack workspace](#bridging-a-second-slack-workspace)). Ask your
+operator to double-check:
+
+- `CCTAG_HUB_URL` in your `.env` matches the Hub they issued the token
+  against
+- `CCTAG_OWNER_USER_ID` exactly matches the `ownerUserId` the token was
+  issued for
+- `node dist/hub/index.js token list`, run on the actual Hub machine (with
+  the matching `CCTAG_ENV_FILE`, if it bridges more than one workspace),
+  shows your name
+
+If it's not listed there, ask them to re-issue it.
 
 ## Usage
 
@@ -222,119 +431,6 @@ answered from the thread) even though nothing was ever sent via `@cctag`.
 
 Multi-question `AskUserQuestion` prompts are answered one question at a
 time — after you answer, cctag reads the next one off the screen.
-
-## Multi-user setups
-
-Slack's Socket Mode delivers each event to exactly one of an app's open
-connections — so multiple people each running their own cctag daemon
-**against the same Slack app token** will steal each other's events, not
-share them. Two ways to have more than one person use cctag:
-
-- **Simplest**: each person creates their own Slack app (their own `@cctag-
-  yourname` bot) from `manifest.yaml` and runs their own daemon against their
-  own machine. Zero code changes — this is standalone mode (`npm run dev`).
-- **Shared bot, Hub–Spoke**: one always-on **Hub** holds the single Socket
-  Mode connection and a small always-on server; everyone else runs a
-  **Spoke** on their own machine, which connects out to the Hub over an
-  authenticated WebSocket (`wss://`) and drives their local herdr/Claude
-  Code instances exactly like standalone mode does. The Hub doesn't run or
-  see anyone's Claude Code session — it only routes Slack events to the
-  right Spoke and relays messages back.
-
-### Running a Hub
-
-The Hub needs the same `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` as standalone
-mode, plus a public `wss://` endpoint (a domain + TLS in front of it —
-[Caddy](https://caddyserver.com) gets you automatic HTTPS with almost no
-config). A single Oracle Cloud "Always Free" `VM.Standard.E2.1.Micro`
-instance is plenty.
-
-```bash
-git clone https://github.com/moiku/claude-code-tag.git /opt/cctag
-cd /opt/cctag && npm install && npm run build
-cat > .env <<EOF
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-CCTAG_HUB_PORT=8765
-EOF
-```
-
-Point a domain at the box (an A record, DNS-only / not proxied through
-Cloudflare or similar — Caddy needs to complete its own ACME/TLS handshake)
-and give Caddy a one-line `/etc/caddy/Caddyfile`:
-
-```
-your.domain.example {
-	reverse_proxy localhost:8765
-}
-```
-
-Run the Hub under systemd (`ExecStart=/usr/bin/node dist/hub/index.js`,
-`EnvironmentFile=/opt/cctag/.env`) so it survives reboots — see
-`assets/cctag-hub.service` for a template unit file — then `systemctl
-enable --now caddy cctag-hub`.
-
-Issue each person a token from the Hub, bound to their own Slack user ID —
-a token can only ever register as the owner it was issued for, so a leaked
-or misused token can't be used to impersonate someone else's connection
-(but it can still act on that owner's own paired threads, so only hand
-these to people you trust):
-
-```bash
-node dist/hub/index.js token issue <name> <ownerUserId>   # prints a token
-node dist/hub/index.js token list
-node dist/hub/index.js token revoke <name>
-```
-
-### Running a Spoke
-
-Same `.env` as standalone mode (`CCTAG_OWNER_USER_ID`, `CCTAG_HERDR_BIN`,
-etc.) but with the Slack tokens replaced by the Hub connection. `CCTAG_OWNER_USER_ID`
-must match the `ownerUserId` the token was issued for:
-
-```bash
-CCTAG_HUB_URL=wss://your.domain.example
-CCTAG_SPOKE_TOKEN=<token from `token issue`>
-```
-
-```bash
-npm run build
-npm run start:spoke   # or dev:spoke while iterating
-```
-
-The Spoke reconnects automatically (with backoff) if the connection drops.
-Pairing state still lives locally on the Spoke's machine
-(`~/.cctag/pairings-<hub-url>.json`, namespaced per Hub — see below) — the
-Hub only keeps a lightweight, in-memory "which thread belongs to which
-Spoke" map, rebuilt from what each Spoke reports on connect.
-
-### Connecting to more than one Slack workspace
-
-A Hub is tied to exactly one Slack app/workspace (its `SLACK_BOT_TOKEN`/
-`SLACK_APP_TOKEN`). To bridge a second workspace, run a second Hub — it
-doesn't need its own machine; a second lightweight process (own port, own
-`.env`, own systemd unit) on the same box is enough — and a second Spoke on
-each machine that should reach both workspaces.
-
-Both Spokes on one machine still talk to the **same local herdr daemon**,
-so they see the same pool of Claude Code instances — pairing one workspace
-to a terminal doesn't stop the other workspace's picker from also offering
-it. cctag doesn't guard against this across separate Spoke processes (only
-within one Spoke's own pairings); avoid pairing the same terminal from two
-workspaces at once, or you'll get keystrokes interleaved from both.
-
-To run two Spokes from a single checkout, point `CCTAG_ENV_FILE` at a
-per-instance `.env` (e.g. `.env.workspace2`) instead of duplicating the
-whole directory — everything else (`CCTAG_HUB_URL`, `CCTAG_SPOKE_TOKEN`,
-pairing storage) is automatically kept separate per Hub URL:
-
-```bash
-CCTAG_ENV_FILE=/opt/cctag/.env.workspace2 node dist/spoke/index.js
-```
-
-For a persistent second instance, add a second launchd
-`LaunchAgent`/systemd unit whose `EnvironmentVariables`/`Environment` sets
-`CCTAG_ENV_FILE` to that second `.env` file.
 
 ## Security notes
 
