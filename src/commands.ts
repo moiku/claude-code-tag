@@ -306,14 +306,23 @@ export class CommandHandler {
         await sleep(600);
         const cur = await this.herdr.agentGet(terminalId);
         if (!cur) break;
-        if (cur.agentStatus === "blocked") {
-          const paneText = await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 40 });
-          const menu = parsePermissionMenu(paneText);
-          if (menu && menu.choices.length > 0) {
-            await this.herdr.agentSend(terminalId, menu.choices[0].num);
-          }
+
+        // Some confirmation menus — notably "Switch model? ... this
+        // conversation is cached, switching means the full history gets
+        // re-read" — don't flip agentStatus to "blocked" the way ordinary
+        // permission/AskUserQuestion prompts do; herdr keeps reporting
+        // "idle" while the menu sits on screen waiting for input (verified
+        // empirically: status stayed "idle" for the entire time the dialog
+        // was up). So check the pane for a parseable menu on every
+        // iteration, not only when status says "blocked" — otherwise this
+        // dialog is mistaken for "already settled" and left unanswered.
+        const paneText = await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 40 });
+        const menu = parsePermissionMenu(paneText);
+        if (menu && menu.choices.length > 0) {
+          await this.herdr.agentSend(terminalId, menu.choices[0].num);
           continue;
         }
+
         if (cur.agentStatus === "idle" || cur.agentStatus === "done") {
           settled = true;
         }
