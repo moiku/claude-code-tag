@@ -1,7 +1,7 @@
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
 export interface AgentInfo {
-  agent: string; // "claude"
+  agent: string; // "claude" | "codex" | ... — selects the driver, see agents/driver.ts
   sessionId: string | null; // agent_session.value, only trusted when kind === "id"
   agentStatus: AgentStatus;
   cwd: string;

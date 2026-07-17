@@ -1,4 +1,3 @@
-import { createReadStream, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -11,14 +10,6 @@ export function encodeCwd(cwd: string): string {
 
 export function transcriptPath(cwd: string, sessionId: string): string {
   return join(homedir(), ".claude", "projects", encodeCwd(cwd), `${sessionId}.jsonl`);
-}
-
-export function transcriptSizeSafe(path: string): number {
-  try {
-    return statSync(path).size;
-  } catch {
-    return 0;
-  }
 }
 
 interface ContentBlock {
@@ -42,52 +33,6 @@ function contentBlocks(record: TranscriptRecord): ContentBlock[] {
   const content = record.message?.content;
   if (Array.isArray(content)) return content as ContentBlock[];
   return [];
-}
-
-/**
- * Reads all complete JSONL lines after `offset` bytes. Returns the parsed
- * records and the new offset (which stops at the last full line — a
- * partially-written trailing line is left unconsumed for the next read).
- */
-export async function readNewRecords(
-  path: string,
-  offset: number,
-): Promise<{ records: TranscriptRecord[]; newOffset: number }> {
-  let size: number;
-  try {
-    size = statSync(path).size;
-  } catch {
-    return { records: [], newOffset: offset };
-  }
-  if (size <= offset) return { records: [], newOffset: offset };
-
-  const chunk = await new Promise<Buffer>((resolve, reject) => {
-    const parts: Buffer[] = [];
-    const stream = createReadStream(path, { start: offset });
-    stream.on("data", (d) => parts.push(d as Buffer));
-    stream.on("end", () => resolve(Buffer.concat(parts)));
-    stream.on("error", reject);
-  });
-
-  const text = chunk.toString("utf8");
-  const lastNewline = text.lastIndexOf("\n");
-  if (lastNewline === -1) {
-    // no complete line yet
-    return { records: [], newOffset: offset };
-  }
-  const complete = text.slice(0, lastNewline);
-  const newOffset = offset + Buffer.byteLength(complete, "utf8") + 1; // +1 for the newline
-
-  const records: TranscriptRecord[] = [];
-  for (const line of complete.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      records.push(JSON.parse(line) as TranscriptRecord);
-    } catch {
-      // skip malformed line defensively
-    }
-  }
-  return { records, newOffset };
 }
 
 /** Concatenates all assistant text blocks in the given records, in order. */

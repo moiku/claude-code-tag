@@ -2,7 +2,8 @@ import type { HerdrClient } from "./herdr/client.js";
 import type { Pairing, PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
-import { extractAssistantText, readNewRecords, transcriptPath, transcriptSizeSafe } from "./transcript.js";
+import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
+import { driverFor } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
 
 function sleep(ms: number): Promise<void> {
@@ -97,13 +98,14 @@ export class BackgroundWatcher {
   private async checkPairing(pairing: Pairing, forceRebaseline: boolean): Promise<void> {
     const agent = await this.herdr.agentGet(pairing.terminalId);
     if (!agent) return;
+    const driver = driverFor(agent.agent);
 
     const existing = this.watches.get(pairing.terminalId);
     const sessionId = agent.sessionId ?? "";
     const sessionRotated = existing !== undefined && sessionId !== "" && sessionId !== existing.sessionId;
 
     if (!existing || sessionRotated || forceRebaseline) {
-      const tPath = sessionId ? transcriptPath(agent.cwd, sessionId) : "";
+      const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       this.watches.set(pairing.terminalId, {
         sessionId,
         transcriptPath: tPath,
@@ -118,12 +120,13 @@ export class BackgroundWatcher {
     if (state.transcriptPath) {
       const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
       state.offset = newOffset;
-      state.collected.push(...extractAssistantText(records));
+      state.collected.push(...driver.extractTurnOutput(records).texts);
     }
 
     if (agent.agentStatus === "blocked") {
       this.watches.delete(pairing.terminalId);
       await this.turnEngine.adoptBlockedTerminal(pairing, {
+        driver,
         sessionId: state.sessionId,
         transcriptPath: state.transcriptPath,
         offset: state.offset,

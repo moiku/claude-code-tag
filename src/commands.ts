@@ -3,16 +3,13 @@ import { PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
 import { agentPickerBlocks } from "./slack/blocks.js";
-import { MODE_ALIASES, MODE_RING, parseCurrentMode, parsePermissionMenu, type CctagMode } from "./prompts.js";
+import { driverFor, type AgentDriver } from "./agents/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Shift+Tab (backtab) as a raw terminal control sequence — see HerdrClient.paneSendText. */
-const BACKTAB = "\x1b[Z";
-
-const HELP_TEXT = [
+const CLAUDE_HELP_TEXT = [
   "*cctag の使い方*",
   "• `@cctag connect` — このスレッドを Claude Code インスタンスに接続（オーナーのみ）",
   "• `@cctag disconnect` — 接続を解除（オーナーのみ）",
@@ -25,39 +22,29 @@ const HELP_TEXT = [
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
 ].join("\n");
 
-const MODEL_COMMAND_RE = /^model\s+(\S+)$/i;
+const CODEX_HELP_TEXT = [
+  "*cctag の使い方（Codex CLI）*",
+  "• `@cctag connect` — このスレッドを Codex CLI インスタンスに接続（オーナーのみ）",
+  "• `@cctag disconnect` — 接続を解除（オーナーのみ）",
+  "• `@cctag status` — 接続状態を表示",
+  "• `@cctag list` — 稼働中のインスタンス一覧",
+  "• `@cctag model <name> [level]` — モデル・推論レベルを切り替え（例: `model gpt-5.6-sol high`）",
+  "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
+  "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
+  "（`mode` / `plan` は Codex CLI では利用できません）",
+].join("\n");
+
+/** Unpaired threads (driver unknown) and Claude Code panes get the full,
+ *  byte-identical help text they always have; other agents get a variant
+ *  without the capabilities they don't support. */
+function helpTextFor(driver: AgentDriver | null): string {
+  if (driver && driver.kind !== "claude") return CODEX_HELP_TEXT;
+  return CLAUDE_HELP_TEXT;
+}
+
+const MODEL_COMMAND_RE = /^model\s+(\S[\s\S]*)$/i;
 const MODE_COMMAND_RE = /^mode\s+(\S+)$/i;
 const LOG_COMMAND_RE = /^log(?:\s+([\s\S]+))?$/i;
-
-/**
- * The TUI always ends with a fixed ~7-line footer (a separator, an empty
- * prompt, another separator, then model/context/cwd/mode status lines) plus
- * a variable amount of blank padding above it. A small `--lines N` read off
- * the bottom lands entirely inside that footer, missing the actual command
- * output higher up — so read a larger chunk and strip the footer/padding
- * off the end instead of trusting a short tail read.
- */
-function stripFooterChrome(raw: string): string {
-  const lines = raw.split("\n");
-  // The model/context status line ("Sonnet 5 │ ctx ▒▒▒ ... /rc") is a
-  // distinctive marker for the start of the fixed ~4-line footer (it's
-  // always followed by a usage-window line, the cwd basename, and a mode
-  // line — none of which are reliably pattern-matchable on their own, e.g.
-  // the cwd line is arbitrary text). Find its last occurrence and cut
-  // everything from there to the end in one shot, then also drop the
-  // separator/empty-prompt/separator directly above it and any blank
-  // padding above that.
-  let end = lines.length;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/ctx\s.*\/rc/.test(lines[i])) {
-      end = i;
-      break;
-    }
-  }
-  while (end > 0 && (/^[─\s]*$/.test(lines[end - 1]) || /^❯\s*$/.test(lines[end - 1].trim()))) end--;
-  while (end > 0 && !lines[end - 1].trim()) end--;
-  return lines.slice(0, end).join("\n").trim();
-}
 
 export interface MentionContext {
   channel: string;
@@ -132,11 +119,27 @@ export class CommandHandler {
         await this.notifier.postReply(
           channel,
           threadTs,
-          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
         );
         return;
       }
-      await this.runTuiCommand(channel, threadTs, pairing.terminalId, `/model ${modelMatch[1]}`);
+      if (this.turnEngine.isBusy(pairing.terminalId)) {
+        await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+        return;
+      }
+      const agent = await this.herdr.agentGet(pairing.terminalId);
+      if (!agent) {
+        await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+        return;
+      }
+      const driver = driverFor(agent.agent);
+      this.turnEngine.markBusy(pairing.terminalId);
+      try {
+        const reply = await driver.runModelCommand(this.herdr, agent, modelMatch[1].trim());
+        await this.notifier.postReply(channel, threadTs, reply);
+      } finally {
+        this.turnEngine.clearBusy(pairing.terminalId);
+      }
       return;
     }
 
@@ -147,20 +150,30 @@ export class CommandHandler {
         await this.notifier.postReply(
           channel,
           threadTs,
-          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
         );
         return;
       }
-      const target = MODE_ALIASES[modeMatch[1].toLowerCase()];
+      const agent = await this.herdr.agentGet(pairing.terminalId);
+      if (!agent) {
+        await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+        return;
+      }
+      const driver = driverFor(agent.agent);
+      if (!driver.modes) {
+        await this.notifier.postReply(channel, threadTs, `⚠️ \`mode\` は ${driver.displayName} では利用できません。`);
+        return;
+      }
+      const target = driver.modes.aliases[modeMatch[1].toLowerCase()];
       if (!target) {
         await this.notifier.postReply(
           channel,
           threadTs,
-          `⚠️ 不明なモード「${modeMatch[1]}」。使えるのは: ${MODE_RING.join(" / ")}`,
+          `⚠️ 不明なモード「${modeMatch[1]}」。使えるのは: ${driver.modes.ring.join(" / ")}`,
         );
         return;
       }
-      await this.runModeCommand(channel, threadTs, pairing.terminalId, target);
+      await this.runModeCommand(channel, threadTs, pairing.terminalId, driver, target);
       return;
     }
 
@@ -177,14 +190,24 @@ export class CommandHandler {
           await this.notifier.postReply(
             channel,
             threadTs,
-            "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+            "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
           );
+          return;
+        }
+        const agent = await this.herdr.agentGet(pairing.terminalId);
+        if (!agent) {
+          await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+          return;
+        }
+        const driver = driverFor(agent.agent);
+        if (!driver.modes) {
+          await this.notifier.postReply(channel, threadTs, `⚠️ \`plan\` は ${driver.displayName} では利用できません。`);
           return;
         }
         // `plan` is just `mode plan` — cycle to plan mode via Shift+Tab
         // rather than the `/plan` slash command, so all four modes share
         // one reliable mechanism.
-        await this.runModeCommand(channel, threadTs, pairing.terminalId, "plan");
+        await this.runModeCommand(channel, threadTs, pairing.terminalId, driver, "plan");
         return;
       }
       case "connect": {
@@ -242,7 +265,13 @@ export class CommandHandler {
       case "help":
       case undefined: {
         if (!text || singleWordCmd === "help") {
-          await this.notifier.postReply(channel, threadTs, HELP_TEXT);
+          const pairing = this.pairingStore.get(channel, threadTs);
+          let driver: AgentDriver | null = null;
+          if (pairing) {
+            const agent = await this.herdr.agentGet(pairing.terminalId).catch(() => null);
+            driver = agent ? driverFor(agent.agent) : null;
+          }
+          await this.notifier.postReply(channel, threadTs, helpTextFor(driver));
           return;
         }
         break; // multi-word text with no recognized command -> fall through to turn dispatch
@@ -255,7 +284,7 @@ export class CommandHandler {
       await this.notifier.postReply(
         channel,
         threadTs,
-        "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+        "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
       );
       return;
     }
@@ -276,15 +305,23 @@ export class CommandHandler {
   }
 
   /**
-   * Runs a CLI slash command (`/model <name>`, `/plan`, ...) rather than a
-   * normal conversational turn. These don't reliably show up in the session
-   * transcript the way an LLM reply does, so — unlike startTurn() — this
-   * reads the result straight off the pane instead. If a confirmation menu
-   * appears (e.g. switching models mid-conversation asks "Switch model?
-   * Yes/No"), it's auto-confirmed with the first option, since the user
-   * asking for the command already expressed that intent.
+   * `@cctag mode <name>` — switches the paired session to one of the
+   * driver's Shift+Tab-style modes (only Claude Code has these; callers
+   * gate on `driver.modes !== null` before calling this). Reads the current
+   * mode off the pane footer and cycles one press at a time, re-reading
+   * after each, until the footer shows the target. Closed-loop rather than
+   * a computed press count, so it's robust to the ring order or footer
+   * wording differing across CLI versions.
    */
-  private async runTuiCommand(channel: string, threadTs: string, terminalId: string, command: string): Promise<void> {
+  private async runModeCommand(
+    channel: string,
+    threadTs: string,
+    terminalId: string,
+    driver: AgentDriver,
+    target: string,
+  ): Promise<void> {
+    const modes = driver.modes;
+    if (!modes) return; // callers gate on this; defensive no-op if reached anyway
     if (this.turnEngine.isBusy(terminalId)) {
       await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
       return;
@@ -297,69 +334,7 @@ export class CommandHandler {
 
     this.turnEngine.markBusy(terminalId);
     try {
-      await this.herdr.agentSend(terminalId, command);
-      await sleep(300);
-      await this.herdr.paneSendKeys(agent.paneId, "Enter");
-
-      let settled = false;
-      for (let i = 0; i < 10 && !settled; i++) {
-        await sleep(600);
-        const cur = await this.herdr.agentGet(terminalId);
-        if (!cur) break;
-
-        // Some confirmation menus — notably "Switch model? ... this
-        // conversation is cached, switching means the full history gets
-        // re-read" — don't flip agentStatus to "blocked" the way ordinary
-        // permission/AskUserQuestion prompts do; herdr keeps reporting
-        // "idle" while the menu sits on screen waiting for input (verified
-        // empirically: status stayed "idle" for the entire time the dialog
-        // was up). So check the pane for a parseable menu on every
-        // iteration, not only when status says "blocked" — otherwise this
-        // dialog is mistaken for "already settled" and left unanswered.
-        const paneText = await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 40 });
-        const menu = parsePermissionMenu(paneText);
-        if (menu && menu.choices.length > 0) {
-          await this.herdr.agentSend(terminalId, menu.choices[0].num);
-          continue;
-        }
-
-        if (cur.agentStatus === "idle" || cur.agentStatus === "done") {
-          settled = true;
-        }
-      }
-
-      const raw = await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 40 });
-      const snippet = stripFooterChrome(raw);
-      await this.notifier.postReply(channel, threadTs, "```\n" + snippet.slice(-1500) + "\n```");
-    } finally {
-      this.turnEngine.clearBusy(terminalId);
-    }
-  }
-
-  /**
-   * `@cctag mode <name>` — switches the paired session to one of Claude
-   * Code's four Shift+Tab modes (manual / accept-edits / plan / auto).
-   * There's no slash command for these, so this reads the current mode off
-   * the pane footer and cycles Shift+Tab (a raw backtab control sequence via
-   * pane send-text; herdr's `send-keys shift+tab` is a no-op here) one press
-   * at a time, re-reading after each, until the footer shows the target.
-   * Closed-loop rather than a computed press count, so it's robust to the
-   * ring order or footer wording differing across Claude Code versions.
-   */
-  private async runModeCommand(channel: string, threadTs: string, terminalId: string, target: CctagMode): Promise<void> {
-    if (this.turnEngine.isBusy(terminalId)) {
-      await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
-      return;
-    }
-    const agent = await this.herdr.agentGet(terminalId);
-    if (!agent) {
-      await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
-      return;
-    }
-
-    this.turnEngine.markBusy(terminalId);
-    try {
-      let current = parseCurrentMode(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
+      let current = modes.parseCurrent(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
       if (current === null) {
         // Don't blind-cycle from an unknown state — pressing Shift+Tab would
         // change the mode with no way to know to what, or to restore it.
@@ -372,13 +347,13 @@ export class CommandHandler {
       }
 
       // Press at most one full ring. A full cycle lands back on the starting
-      // mode, so if the target isn't reachable (not in this Claude Code
-      // build) we end up exactly where we began rather than in some other
-      // mode while reporting failure.
-      for (let i = 0; i < MODE_RING.length && current !== target; i++) {
-        await this.herdr.paneSendText(agent.paneId, BACKTAB);
+      // mode, so if the target isn't reachable (not in this CLI build) we
+      // end up exactly where we began rather than in some other mode while
+      // reporting failure.
+      for (let i = 0; i < modes.ring.length && current !== target; i++) {
+        await modes.cycle(this.herdr, agent.paneId);
         await sleep(400);
-        current = parseCurrentMode(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
+        current = modes.parseCurrent(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
       }
 
       if (current === target) {
@@ -387,7 +362,7 @@ export class CommandHandler {
         await this.notifier.postReply(
           channel,
           threadTs,
-          `⚠️ モード「${target}」に切り替えられませんでした（このバージョンの Claude Code には無い可能性があります）。元のモードに戻しました。現在: ${current ?? "不明"}`,
+          `⚠️ モード「${target}」に切り替えられませんでした（このバージョンの ${driver.displayName} には無い可能性があります）。元のモードに戻しました。現在: ${current ?? "不明"}`,
         );
       }
     } finally {
@@ -408,7 +383,7 @@ export class CommandHandler {
       await this.notifier.postReply(
         channel,
         threadTs,
-        "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、Claude Code インスタンスを選択してください。",
+        "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
       );
       return;
     }
@@ -499,11 +474,14 @@ export class CommandHandler {
       threadTs,
       terminalId,
       cwd: agent.cwd,
+      agent: agent.agent,
       pairedBy: userId,
       pairedAt: new Date().toISOString(),
     });
 
-    await this.notifier.postReply(channel, threadTs, `✅ 接続しました: ${agent.cwd}`);
+    const driver = driverFor(agent.agent);
+    const suffix = driver.kind === "claude" ? "" : `（${driver.displayName}）`;
+    await this.notifier.postReply(channel, threadTs, `✅ 接続しました: ${agent.cwd}${suffix}`);
   }
 
   async handleAskUserQuestionButton(ctx: AskUserQuestionButtonContext): Promise<void> {

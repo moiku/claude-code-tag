@@ -1,6 +1,6 @@
 import type { AgentInfo } from "../herdr/types.js";
-import type { AskUserQuestionPaneInfo, PermissionMenu } from "../prompts.js";
-import { isDangerousSnippet, isRefusalLabel } from "../prompts.js";
+import type { AskUserQuestionPaneInfo, PermissionMenu } from "../agents/driver.js";
+import { isDangerousSnippet, isRefusalLabel } from "../agents/driver.js";
 
 const STATUS_ICON: Record<string, string> = {
   idle: "🟢",
@@ -21,7 +21,7 @@ export function agentPickerBlocks(agents: AgentInfo[]) {
     return [
       {
         type: "section",
-        text: { type: "mrkdwn", text: "現在 herdr 上で稼働中の Claude Code インスタンスが見つかりません。" },
+        text: { type: "mrkdwn", text: "現在 herdr 上で稼働中のインスタンスが見つかりません。" },
       },
     ];
   }
@@ -33,13 +33,16 @@ export function agentPickerBlocks(agents: AgentInfo[]) {
         type: "static_select",
         action_id: "pair_select",
         placeholder: { type: "plain_text", text: "インスタンスを選択" },
-        options: agents.map((a) => ({
-          text: {
-            type: "plain_text",
-            text: `${STATUS_ICON[a.agentStatus] ?? "⚪"} ${truncateLeft(a.cwd, 60)}`.slice(0, 75),
-          },
-          value: a.terminalId,
-        })),
+        options: agents.map((a) => {
+          const prefix = a.agent && a.agent !== "claude" ? `[${a.agent}] ` : "";
+          return {
+            text: {
+              type: "plain_text",
+              text: `${STATUS_ICON[a.agentStatus] ?? "⚪"} ${prefix}${truncateLeft(a.cwd, 60)}`.slice(0, 75),
+            },
+            value: a.terminalId,
+          };
+        }),
       },
     },
   ];

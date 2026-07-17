@@ -1,7 +1,8 @@
 import type { HerdrClient } from "./herdr/client.js";
 import type { Pairing } from "./pairing.js";
 import type { MessageHandle, Notifier } from "./notifier.js";
-import { extractAssistantText, extractToolUseSummaries, readNewRecords, transcriptPath, transcriptSizeSafe } from "./transcript.js";
+import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
+import { driverFor, type AgentDriver, type AskUserQuestionPaneInfo } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
 import {
   askUserQuestionAnsweredText,
@@ -10,24 +11,11 @@ import {
   permissionBlocks,
   permissionParseFailureBlocks,
 } from "./slack/blocks.js";
-import {
-  findPlanFeedbackOption,
-  parseAskUserQuestionPane,
-  parsePermissionMenu,
-  parsePlanFilePath,
-  type AskUserQuestionPaneInfo,
-} from "./prompts.js";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Expands a leading ~ to the user's home directory. */
-function expandHome(p: string): string {
-  return p.startsWith("~/") || p === "~" ? p.replace(/^~/, homedir()) : p;
 }
 
 export type TurnPhase = "running" | "awaiting-question" | "awaiting-permission";
@@ -36,6 +24,7 @@ interface TurnState {
   phase: TurnPhase;
   pairing: Pairing;
   requesterUserId: string;
+  driver: AgentDriver;
   paneId: string;
   sessionId: string;
   transcriptPath: string;
@@ -47,9 +36,9 @@ interface TurnState {
   startedAt: number;
   abort: AbortController;
   // AskUserQuestion / permission prompts are read off the pane, not the
-  // transcript — see prompts.ts for why. Each newly-posted prompt gets a
-  // fresh id so stale button clicks (from an already-resolved or
-  // already-superseded prompt) can be rejected.
+  // transcript — see agents/claude/prompts.ts for why. Each newly-posted
+  // prompt gets a fresh id so stale button clicks (from an already-resolved
+  // or already-superseded prompt) can be rejected.
   currentPromptId: number;
   promptHandle?: MessageHandle;
   pendingQuestionInfo?: AskUserQuestionPaneInfo;
@@ -72,6 +61,7 @@ export type AnswerResult = { ok: true } | { ok: false; reason: "not-pending" };
  * pairing before it noticed the terminal was blocked — handed over so
  * adoptBlockedTerminal() doesn't lose or re-read anything. */
 export interface BlockedTerminalHandoff {
+  driver: AgentDriver;
   sessionId: string;
   transcriptPath: string;
   offset: number;
@@ -132,9 +122,10 @@ export class TurnEngine {
       if (!agent) {
         throw new Error("agent-not-found");
       }
+      const driver = driverFor(agent.agent);
 
       const sessionId = agent.sessionId ?? "";
-      const tPath = sessionId ? transcriptPath(agent.cwd, sessionId) : "";
+      const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       const offset = tPath ? transcriptSizeSafe(tPath) : 0;
 
       const statusHandle = await this.notifier.postMessage(pairing.channel, pairing.threadTs ?? "", "⚙️ 実行中…");
@@ -143,6 +134,7 @@ export class TurnEngine {
         phase: "running",
         pairing,
         requesterUserId,
+        driver,
         paneId: agent.paneId,
         sessionId,
         transcriptPath: tPath,
@@ -213,6 +205,7 @@ export class TurnEngine {
         phase: "running",
         pairing,
         requesterUserId: pairing.pairedBy,
+        driver: handoff.driver,
         paneId: handoff.paneId,
         sessionId: handoff.sessionId,
         transcriptPath: handoff.transcriptPath,
@@ -244,7 +237,7 @@ export class TurnEngine {
     const info = state.pendingQuestionInfo;
     const label = info.options[optionIndex]?.label ?? String(optionIndex + 1);
 
-    await this.herdr.agentSend(terminalId, String(optionIndex + 1));
+    await state.driver.answerOption(this.herdr, terminalId, state.paneId, String(optionIndex + 1));
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, label), []).catch(() => {});
     state.promptHandle = undefined;
     state.pendingQuestionInfo = undefined;
@@ -258,15 +251,9 @@ export class TurnEngine {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
+    if (!state.driver.answerQuestionFreeText) return { ok: false, reason: "not-pending" };
 
-    // Navigate down to the "Type something" row (Phase 0: digit-select only
-    // works for real options; the free-text row must be reached via arrows
-    // and then have its placeholder replaced before Enter).
-    const downs = Array(info.options.length).fill("Down");
-    if (downs.length) await this.herdr.paneSendKeys(state.paneId, ...downs);
-    await this.herdr.agentSend(terminalId, freeText);
-    await sleep(200);
-    await this.herdr.paneSendKeys(state.paneId, "Enter");
+    await state.driver.answerQuestionFreeText(this.herdr, terminalId, state.paneId, info, freeText);
 
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, freeText), []).catch(() => {});
     state.promptHandle = undefined;
@@ -280,7 +267,7 @@ export class TurnEngine {
     if (!state || state.phase !== "awaiting-permission" || state.currentPromptId !== promptId) {
       return { ok: false, reason: "not-pending" };
     }
-    await this.herdr.agentSend(terminalId, num);
+    await state.driver.answerOption(this.herdr, terminalId, state.paneId, num);
     await state.promptHandle?.update(`→ ${num} を送信しました`, []).catch(() => {});
     state.promptHandle = undefined;
     state.planFeedbackOptionNum = undefined;
@@ -301,11 +288,8 @@ export class TurnEngine {
     if (!state || state.phase !== "awaiting-permission" || state.planFeedbackOptionNum === undefined) {
       return { ok: false, reason: "not-pending" };
     }
-    await this.herdr.agentSend(terminalId, String(state.planFeedbackOptionNum));
-    await sleep(200);
-    await this.herdr.agentSend(terminalId, freeText);
-    await sleep(200);
-    await this.herdr.paneSendKeys(state.paneId, "Enter");
+    if (!state.driver.answerPlanFeedback) return { ok: false, reason: "not-pending" };
+    await state.driver.answerPlanFeedback(this.herdr, terminalId, state.paneId, state.planFeedbackOptionNum, freeText);
 
     await state.promptHandle?.update(`→ 修正を依頼しました: ${freeText}`, []).catch(() => {});
     state.promptHandle = undefined;
@@ -336,15 +320,16 @@ export class TurnEngine {
 
       if (agent.sessionId && agent.sessionId !== state.sessionId) {
         state.sessionId = agent.sessionId;
-        state.transcriptPath = transcriptPath(agent.cwd, agent.sessionId);
+        state.transcriptPath = state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
         state.offset = 0;
       }
 
       if (state.transcriptPath) {
         const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
         state.offset = newOffset;
-        state.collected.push(...extractAssistantText(records));
-        for (const name of extractToolUseSummaries(records)) {
+        const { texts, toolNames } = state.driver.extractTurnOutput(records);
+        state.collected.push(...texts);
+        for (const name of toolNames) {
           state.toolCounts[name] = (state.toolCounts[name] ?? 0) + 1;
         }
       }
@@ -374,10 +359,11 @@ export class TurnEngine {
           // A NEW prompt appeared (either the first one this turn, or the
           // next one in a multi-question flow — each is independently
           // parsed off the pane; see prompts.ts).
-          const paneText = await this.herdr.paneRead(state.paneId, { source: "recent", lines: 60 });
-          const aq = parseAskUserQuestionPane(paneText);
+          const paneText = await this.herdr.paneRead(state.paneId, { source: state.driver.paneReadSource, lines: 60 });
+          const prompt = state.driver.parseBlockedPane(paneText);
           state.currentPromptId += 1;
-          if (aq) {
+          if (prompt.kind === "question") {
+            const aq = prompt.info;
             state.pendingQuestionInfo = aq;
             state.promptHandle = await this.notifier.postMessage(
               state.pairing.channel,
@@ -387,18 +373,8 @@ export class TurnEngine {
             );
             state.phase = "awaiting-question";
           } else {
-            const menu = parsePermissionMenu(paneText);
-            // Is this the ExitPlanMode approval (plan mode finished, awaiting
-            // go-ahead)? Detect it from the *parsed menu's* choices (the
-            // active menu parsePermissionMenu isolated), not the raw pane —
-            // otherwise a "Tell Claude what to change" line left in scrollback
-            // by an earlier resolved plan prompt could misclassify a later
-            // ordinary permission prompt. The plan path is likewise the
-            // bottom-most match. If so, attach the plan file and remember the
-            // feedback option so a free-text reply can refine the plan.
-            const feedbackNum = findPlanFeedbackOption(paneText);
-            const isPlanPrompt = feedbackNum !== null;
-            state.planFeedbackOptionNum = feedbackNum ?? undefined;
+            const { menu, isPlanPrompt, planFeedbackOptionNum: feedbackNum } = prompt;
+            state.planFeedbackOptionNum = feedbackNum;
 
             if (isPlanPrompt && this.notifier.uploadTextFile) {
               await this.attachPlanFile(state, paneText).catch((err) =>
@@ -412,7 +388,7 @@ export class TurnEngine {
             // That path is handled by a free-text thread reply instead
             // (answerPlanFeedback), which the header points the user to.
             const buttonMenu =
-              menu && feedbackNum !== null
+              menu && feedbackNum !== undefined
                 ? { ...menu, choices: menu.choices.filter((c) => c.num !== String(feedbackNum)) }
                 : menu;
 
@@ -476,49 +452,22 @@ export class TurnEngine {
   }
 
   /**
-   * Reads the plan markdown Claude Code wrote to ~/.claude/plans/<slug>.md
+   * Reads the plan markdown the driver wrote (Claude Code's ExitPlanMode)
    * and uploads it to the thread, so the full plan is available as a
    * downloadable file rather than only rendered (line-wrapped) in the pane.
-   *
-   * The path shown in the pane footer gets truncated when the pane is narrow
-   * (the .md suffix can be cut off), so the pane-parsed path is only a
-   * preferred hint: if it doesn't parse to an existing file, fall back to the
-   * most-recently-modified plan file, which Claude Code writes immediately
-   * before showing the approval prompt.
    */
   private async attachPlanFile(state: TurnState, paneText: string): Promise<void> {
     if (!this.notifier.uploadTextFile) return;
-    const abs = this.resolvePlanFile(paneText);
+    if (!state.driver.resolvePlanFile) return;
+    const abs = state.driver.resolvePlanFile(paneText);
     if (!abs) return;
     const content = readFileSync(abs, "utf8");
     if (!content.trim()) return;
     await this.notifier.uploadTextFile(state.pairing.channel, state.pairing.threadTs ?? "", {
       content,
       filename: basename(abs),
-      title: "Claude Code のプラン",
+      title: `${state.driver.displayName} のプラン`,
       comment: "📋 プラン全文（.md）",
     });
-  }
-
-  private resolvePlanFile(paneText: string): string | null {
-    const hinted = parsePlanFilePath(paneText);
-    if (hinted) {
-      const abs = expandHome(hinted);
-      if (existsSync(abs)) return abs;
-    }
-    // Fallback: newest *.md in ~/.claude/plans/.
-    const dir = join(homedir(), ".claude", "plans");
-    try {
-      let newest: { path: string; mtime: number } | null = null;
-      for (const name of readdirSync(dir)) {
-        if (!name.endsWith(".md")) continue;
-        const p = join(dir, name);
-        const mtime = statSync(p).mtimeMs;
-        if (!newest || mtime > newest.mtime) newest = { path: p, mtime };
-      }
-      return newest?.path ?? null;
-    } catch {
-      return null;
-    }
   }
 }

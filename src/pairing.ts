@@ -8,6 +8,10 @@ export interface Pairing {
   threadTs?: string;
   terminalId: string;
   cwd: string; // display only, snapshotted at pairing time
+  // Display/help-text only, snapshotted at pairing time (e.g. "claude" | "codex").
+  // Driver selection always comes from a live agentGet() call, never this field —
+  // so a pane whose CLI changed after pairing still gets the right driver.
+  agent?: string;
   pairedBy: string; // Slack user id of the owner who paired it
   pairedAt: string; // ISO 8601
 }

@@ -13,15 +13,7 @@
  * which only appears in AskUserQuestion menus.
  */
 
-export interface PermissionChoice {
-  num: string;
-  label: string;
-}
-
-export interface PermissionMenu {
-  choices: PermissionChoice[];
-  snippet: string;
-}
+import type { AskUserQuestionOption, AskUserQuestionPaneInfo, PermissionChoice, PermissionMenu } from "../driver.js";
 
 const NUMBERED_LINE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(.+?)\s*$/;
 const CURSOR_LINE_RE = /❯\s*\d+\./;
@@ -63,18 +55,6 @@ export function parsePermissionMenu(paneText: string): PermissionMenu | null {
     .trim();
 
   return { choices, snippet };
-}
-
-export interface AskUserQuestionOption {
-  label: string;
-  description?: string;
-}
-
-export interface AskUserQuestionPaneInfo {
-  header: string;
-  question: string;
-  options: AskUserQuestionOption[];
-  multiSelect: boolean;
 }
 
 const TYPE_SOMETHING_RE = /^\s*(?:❯\s*)?(\d+)\.\s*Type something\.?\s*$/;
@@ -181,6 +161,9 @@ export function parseCurrentMode(paneText: string): CctagMode | null {
   return null;
 }
 
+/** Shift+Tab (backtab) as a raw terminal control sequence — see HerdrClient.paneSendText. */
+export const BACKTAB = "\x1b[Z";
+
 /**
  * Claude Code's ExitPlanMode approval prompt prints the plan's file path in
  * its footer, e.g. "ctrl+g to edit in Vim · ~/.claude/plans/<slug>.md".
@@ -232,13 +215,32 @@ export function findPlanFeedbackOption(paneText: string): number | null {
   return null;
 }
 
-const DANGER_WORDS_RE = /\b(rm\s+-rf|sudo|--force|DROP\s+TABLE)\b/i;
-const REFUSAL_LABEL_RE = /no|cancel|拒否|キャンセル|don'?t/i;
-
-export function isDangerousSnippet(snippet: string): boolean {
-  return DANGER_WORDS_RE.test(snippet);
-}
-
-export function isRefusalLabel(label: string): boolean {
-  return REFUSAL_LABEL_RE.test(label);
+/**
+ * The TUI always ends with a fixed ~7-line footer (a separator, an empty
+ * prompt, another separator, then model/context/cwd/mode status lines) plus
+ * a variable amount of blank padding above it. A small `--lines N` read off
+ * the bottom lands entirely inside that footer, missing the actual command
+ * output higher up — so read a larger chunk and strip the footer/padding
+ * off the end instead of trusting a short tail read.
+ */
+export function stripFooterChrome(raw: string): string {
+  const lines = raw.split("\n");
+  // The model/context status line ("Sonnet 5 │ ctx ▒▒▒ ... /rc") is a
+  // distinctive marker for the start of the fixed ~4-line footer (it's
+  // always followed by a usage-window line, the cwd basename, and a mode
+  // line — none of which are reliably pattern-matchable on their own, e.g.
+  // the cwd line is arbitrary text). Find its last occurrence and cut
+  // everything from there to the end in one shot, then also drop the
+  // separator/empty-prompt/separator directly above it and any blank
+  // padding above that.
+  let end = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/ctx\s.*\/rc/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  while (end > 0 && (/^[─\s]*$/.test(lines[end - 1]) || /^❯\s*$/.test(lines[end - 1].trim()))) end--;
+  while (end > 0 && !lines[end - 1].trim()) end--;
+  return lines.slice(0, end).join("\n").trim();
 }
