@@ -71,9 +71,12 @@ export class HerdrClient {
     return agents.map(normalizeAgent);
   }
 
-  async agentGet(target: string): Promise<AgentInfo | null> {
+  /** `paneId` — herdr 0.7.5+ only resolves agent-level commands by a unique
+   *  agent name or the pane id currently hosting the agent; terminal_id is no
+   *  longer a valid target (see pairing.ts's Pairing.paneId doc). */
+  async agentGet(paneId: string): Promise<AgentInfo | null> {
     try {
-      const json = (await this.run(["agent", "get", target])) as { result?: { agent?: RawAgent } };
+      const json = (await this.run(["agent", "get", paneId])) as { result?: { agent?: RawAgent } };
       const agent = json.result?.agent;
       return agent ? normalizeAgent(agent) : null;
     } catch (err) {
@@ -84,9 +87,21 @@ export class HerdrClient {
     }
   }
 
-  /** Sends literal text into the target's input box. Does NOT submit — call paneSendKeys(..., "Enter") separately. */
-  async agentSend(target: string, text: string): Promise<void> {
-    await this.run(["agent", "send", target, text]);
+  /**
+   * Sends literal text into the target's input box. Does NOT submit — call
+   * paneSendKeys(..., "Enter") separately.
+   *
+   * herdr 0.7.5 removed the `agent send` command. Its CHANGELOG calls
+   * `agent send-keys` the replacement, but that command only accepts
+   * recognized key *names* (like tmux send-keys without -l) and rejects any
+   * multi-word literal string with `invalid_key` — verified empirically
+   * against a live pane. `pane send-text` ("Send literal text to a pane",
+   * single free-form `text` param) is what actually does what `agent send`
+   * used to; herdr has no agent-scoped equivalent, but pane- and
+   * agent-level commands address the same underlying pane, so this works.
+   */
+  async agentSend(paneId: string, text: string): Promise<void> {
+    await this.runRaw(["pane", "send-text", paneId, text]);
   }
 
   /** `pane send-keys` prints nothing on success (unlike other subcommands) — don't JSON-parse it. */

@@ -6,6 +6,16 @@ export interface Pairing {
   key: string; // `${channel}:${threadTs}` for thread pairings, `${channel}` for channel pairings
   channel: string;
   threadTs?: string;
+  // The herdr target used for every agent-level call (get/send-keys/prompt).
+  // herdr 0.7.5 dropped terminal_id as a valid agent target — only a unique
+  // agent name or its hosting pane id resolve now — so paneId is the
+  // functional identity going forward. It's also more durable than
+  // terminalId: a pane's id doesn't change when the CLI running inside it
+  // restarts, so a pairing survives a Claude Code/Codex restart in place.
+  paneId: string;
+  // Display/debug only, snapshotted at pairing time — never used to address
+  // herdr (see paneId). A pane whose occupant restarts gets a new terminalId,
+  // so this can go stale; that's fine, it's cosmetic.
   terminalId: string;
   cwd: string; // display only, snapshotted at pairing time
   // Display/help-text only, snapshotted at pairing time (e.g. "claude" | "codex").
@@ -74,9 +84,9 @@ export class PairingStore {
     return this.pairings.get(PairingStore.channelKey(channel));
   }
 
-  byTerminal(terminalId: string): Pairing | undefined {
+  byPane(paneId: string): Pairing | undefined {
     for (const p of this.pairings.values()) {
-      if (p.terminalId === terminalId) return p;
+      if (p.paneId === paneId) return p;
     }
     return undefined;
   }

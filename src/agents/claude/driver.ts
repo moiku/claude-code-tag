@@ -28,17 +28,17 @@ function sleep(ms: number): Promise<void> {
  */
 async function runClaudeSlashCommand(
   herdr: HerdrClient,
-  agent: { terminalId: string; paneId: string },
+  agent: { paneId: string },
   command: string,
 ): Promise<string> {
-  await herdr.agentSend(agent.terminalId, command);
+  await herdr.agentSend(agent.paneId, command);
   await sleep(300);
   await herdr.paneSendKeys(agent.paneId, "Enter");
 
   let settled = false;
   for (let i = 0; i < 10 && !settled; i++) {
     await sleep(600);
-    const cur = await herdr.agentGet(agent.terminalId);
+    const cur = await herdr.agentGet(agent.paneId);
     if (!cur) break;
 
     // Some confirmation menus — notably "Switch model? ... this
@@ -53,7 +53,7 @@ async function runClaudeSlashCommand(
     const paneText = await herdr.paneRead(agent.paneId, { source: "recent", lines: 40 });
     const menu = parsePermissionMenu(paneText);
     if (menu && menu.choices.length > 0) {
-      await herdr.agentSend(agent.terminalId, menu.choices[0].num);
+      await herdr.agentSend(agent.paneId, menu.choices[0].num);
       continue;
     }
 
@@ -94,27 +94,27 @@ export const claudeDriver: AgentDriver = {
     };
   },
 
-  async answerOption(herdr, terminalId, _paneId, value) {
-    await herdr.agentSend(terminalId, value);
+  async answerOption(herdr, paneId, value) {
+    await herdr.agentSend(paneId, value);
   },
 
-  async answerQuestionFreeText(herdr, terminalId, paneId, info, text) {
+  async answerQuestionFreeText(herdr, paneId, info, text) {
     // Navigate down to the "Type something" row (the free-text row must be
     // reached via arrows and then have its placeholder replaced before Enter).
     const downs = Array(info.options.length).fill("Down");
     if (downs.length) await herdr.paneSendKeys(paneId, ...downs);
-    await herdr.agentSend(terminalId, text);
+    await herdr.agentSend(paneId, text);
     await sleep(200);
     await herdr.paneSendKeys(paneId, "Enter");
   },
 
-  async answerPlanFeedback(herdr, terminalId, paneId, optionNum, text) {
+  async answerPlanFeedback(herdr, paneId, optionNum, text) {
     // Verified mechanics: send the option's digit to move the cursor there,
     // type the feedback — which replaces the option's placeholder label
     // inline — then Enter, which refines the plan and stays in plan mode.
-    await herdr.agentSend(terminalId, String(optionNum));
+    await herdr.agentSend(paneId, String(optionNum));
     await sleep(200);
-    await herdr.agentSend(terminalId, text);
+    await herdr.agentSend(paneId, text);
     await sleep(200);
     await herdr.paneSendKeys(paneId, "Enter");
   },

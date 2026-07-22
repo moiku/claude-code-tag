@@ -73,6 +73,8 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       });
 
       rpc.onCall("pair_select", async (payload) => {
+        // Field is named terminalId on the wire (Hub compat) but actually
+        // carries a paneId — see PairSelectContext.terminalId's doc comment.
         const p = payload as { channel: string; threadTs: string; userId: string; terminalId: string };
         await commands.handlePairSelect(p);
         return {};

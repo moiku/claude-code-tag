@@ -76,11 +76,10 @@ export interface AgentDriver {
   /** Classifies what a `blocked` pane is currently showing. */
   parseBlockedPane(paneText: string): BlockedPrompt;
   /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
-  answerOption(herdr: HerdrClient, terminalId: string, paneId: string, value: string): Promise<void>;
+  answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */
   answerQuestionFreeText?(
     herdr: HerdrClient,
-    terminalId: string,
     paneId: string,
     info: AskUserQuestionPaneInfo,
     text: string,
@@ -88,7 +87,6 @@ export interface AgentDriver {
   /** Free-text refinement of a pending plan-approval prompt. Absent = unsupported. */
   answerPlanFeedback?(
     herdr: HerdrClient,
-    terminalId: string,
     paneId: string,
     optionNum: number,
     text: string,
@@ -99,11 +97,7 @@ export interface AgentDriver {
   /** Shift+Tab-style mode ring, or null if this agent has no equivalent. */
   readonly modes: ModeSupport | null;
   /** Handles `@cctag model <argsText>` end-to-end; returns the Slack reply text to post. */
-  runModelCommand(
-    herdr: HerdrClient,
-    agent: { terminalId: string; paneId: string },
-    argsText: string,
-  ): Promise<string>;
+  runModelCommand(herdr: HerdrClient, agent: { paneId: string }, argsText: string): Promise<string>;
 }
 
 const DANGER_WORDS_RE = /\b(rm\s+-rf|sudo|--force|DROP\s+TABLE)\b/i;

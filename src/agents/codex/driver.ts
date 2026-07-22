@@ -84,11 +84,11 @@ export const codexDriver: AgentDriver = {
     return { kind: "permission", menu, isPlanPrompt: false, planFeedbackOptionNum: undefined };
   },
 
-  async answerOption(herdr, terminalId, paneId, value) {
+  async answerOption(herdr, paneId, value) {
     // Verified empirically: unlike Claude Code's permission menu (digit
     // alone submits), Codex's approval/trust/model menus show "Press enter
     // to confirm" — the digit only moves the cursor, Enter is required.
-    await herdr.agentSend(terminalId, value);
+    await herdr.agentSend(paneId, value);
     await sleep(150);
     await herdr.paneSendKeys(paneId, "Enter");
   },
@@ -109,7 +109,7 @@ export const codexDriver: AgentDriver = {
       return "⚠️ モデル名を指定してください。";
     }
 
-    await herdr.agentSend(agent.terminalId, "/model");
+    await herdr.agentSend(agent.paneId, "/model");
     await sleep(300);
     await herdr.paneSendKeys(agent.paneId, "Enter");
     await sleep(600);

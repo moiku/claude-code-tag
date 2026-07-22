@@ -40,7 +40,7 @@ interface WatchState {
  * from scratch, so it never re-posts what a turn already reported.
  */
 export class BackgroundWatcher {
-  private watches = new Map<string, WatchState>(); // key: terminalId
+  private watches = new Map<string, WatchState>(); // key: paneId
   private busyLastTick = new Set<string>();
 
   private running = false;
@@ -75,7 +75,7 @@ export class BackgroundWatcher {
 
   private async tick(): Promise<void> {
     const pairings = this.pairingStore.list();
-    const liveKeys = new Set(pairings.map((p) => p.terminalId));
+    const liveKeys = new Set(pairings.map((p) => p.paneId));
     for (const key of this.watches.keys()) {
       if (!liveKeys.has(key)) {
         this.watches.delete(key);
@@ -84,11 +84,11 @@ export class BackgroundWatcher {
     }
 
     for (const pairing of pairings) {
-      if (this.turnEngine.isBusy(pairing.terminalId)) {
-        this.busyLastTick.add(pairing.terminalId);
+      if (this.turnEngine.isBusy(pairing.paneId)) {
+        this.busyLastTick.add(pairing.paneId);
         continue;
       }
-      const resumingFromActiveTurn = this.busyLastTick.delete(pairing.terminalId);
+      const resumingFromActiveTurn = this.busyLastTick.delete(pairing.paneId);
       await this.checkPairing(pairing, resumingFromActiveTurn).catch((err) =>
         console.error(`[watcher] pairing ${pairing.key} check failed:`, err),
       );
@@ -96,17 +96,17 @@ export class BackgroundWatcher {
   }
 
   private async checkPairing(pairing: Pairing, forceRebaseline: boolean): Promise<void> {
-    const agent = await this.herdr.agentGet(pairing.terminalId);
+    const agent = await this.herdr.agentGet(pairing.paneId);
     if (!agent) return;
     const driver = driverFor(agent.agent);
 
-    const existing = this.watches.get(pairing.terminalId);
+    const existing = this.watches.get(pairing.paneId);
     const sessionId = agent.sessionId ?? "";
     const sessionRotated = existing !== undefined && sessionId !== "" && sessionId !== existing.sessionId;
 
     if (!existing || sessionRotated || forceRebaseline) {
       const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
-      this.watches.set(pairing.terminalId, {
+      this.watches.set(pairing.paneId, {
         sessionId,
         transcriptPath: tPath,
         offset: tPath ? transcriptSizeSafe(tPath) : 0,
@@ -124,7 +124,7 @@ export class BackgroundWatcher {
     }
 
     if (agent.agentStatus === "blocked") {
-      this.watches.delete(pairing.terminalId);
+      this.watches.delete(pairing.paneId);
       await this.turnEngine.adoptBlockedTerminal(pairing, {
         driver,
         sessionId: state.sessionId,

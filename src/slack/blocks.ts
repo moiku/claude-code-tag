@@ -40,7 +40,7 @@ export function agentPickerBlocks(agents: AgentInfo[]) {
               type: "plain_text",
               text: `${STATUS_ICON[a.agentStatus] ?? "⚪"} ${prefix}${truncateLeft(a.cwd, 60)}`.slice(0, 75),
             },
-            value: a.terminalId,
+            value: a.paneId,
           };
         }),
       },
@@ -64,13 +64,13 @@ export function doneStatusText(elapsedSec: number, toolCounts: Record<string, nu
 
 interface AqButtonValue {
   k: "aq";
-  t: string; // terminalId
+  t: string; // paneId (herdr agent-command target — see pairing.ts)
   p: number; // promptId (race guard — this prompt's slot in the turn)
   o: number; // option index
 }
 
 /** Renders an AskUserQuestion prompt read off the pane (one question at a time). */
-export function askUserQuestionBlocks(terminalId: string, promptId: number, info: AskUserQuestionPaneInfo) {
+export function askUserQuestionBlocks(paneId: string, promptId: number, info: AskUserQuestionPaneInfo) {
   const header = `❓ ${info.header}`;
   const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: `*${header}*\n${info.question}` } }];
 
@@ -93,7 +93,7 @@ export function askUserQuestionBlocks(terminalId: string, promptId: number, info
     elements: info.options.slice(0, 4).map((o, i) => ({
       type: "button",
       text: { type: "plain_text", text: `${i + 1}. ${o.label}`.slice(0, 75) },
-      value: JSON.stringify({ k: "aq", t: terminalId, p: promptId, o: i } satisfies AqButtonValue),
+      value: JSON.stringify({ k: "aq", t: paneId, p: promptId, o: i } satisfies AqButtonValue),
       action_id: `aq_answer_${i}`,
     })),
   });
@@ -121,7 +121,7 @@ interface PermButtonValue {
   n: string;
 }
 
-export function permissionBlocks(terminalId: string, promptId: number, menu: PermissionMenu, headerOverride?: string) {
+export function permissionBlocks(paneId: string, promptId: number, menu: PermissionMenu, headerOverride?: string) {
   const danger = isDangerousSnippet(menu.snippet);
   const header = headerOverride ?? (danger ? "🚨 許可リクエスト（危険な可能性）" : "⚠️ 許可リクエスト");
   const blocks: unknown[] = [
@@ -133,7 +133,7 @@ export function permissionBlocks(terminalId: string, promptId: number, menu: Per
         type: "button",
         text: { type: "plain_text", text: `${c.num}. ${c.label}`.slice(0, 75) },
         style: c.num === "1" ? "primary" : isRefusalLabel(c.label) ? "danger" : undefined,
-        value: JSON.stringify({ k: "perm", t: terminalId, p: promptId, n: c.num } satisfies PermButtonValue),
+        value: JSON.stringify({ k: "perm", t: paneId, p: promptId, n: c.num } satisfies PermButtonValue),
         action_id: `perm_choice_${c.num}`,
       })),
     },
@@ -141,7 +141,7 @@ export function permissionBlocks(terminalId: string, promptId: number, menu: Per
   return blocks;
 }
 
-export function permissionParseFailureBlocks(terminalId: string, promptId: number, rawSnippet: string) {
+export function permissionParseFailureBlocks(paneId: string, promptId: number, rawSnippet: string) {
   return [
     { type: "section", text: { type: "mrkdwn", text: "⚠️ 許可リクエスト（メニューを解析できませんでした）" } },
     { type: "section", text: { type: "mrkdwn", text: "```\n" + rawSnippet.slice(0, 2900) + "\n```" } },
@@ -152,14 +152,14 @@ export function permissionParseFailureBlocks(terminalId: string, promptId: numbe
           type: "button",
           text: { type: "plain_text", text: "✅ 承認 (y)" },
           style: "primary",
-          value: JSON.stringify({ k: "perm", t: terminalId, p: promptId, n: "y" } satisfies PermButtonValue),
+          value: JSON.stringify({ k: "perm", t: paneId, p: promptId, n: "y" } satisfies PermButtonValue),
           action_id: "perm_choice_y",
         },
         {
           type: "button",
           text: { type: "plain_text", text: "❌ 拒否 (n)" },
           style: "danger",
-          value: JSON.stringify({ k: "perm", t: terminalId, p: promptId, n: "n" } satisfies PermButtonValue),
+          value: JSON.stringify({ k: "perm", t: paneId, p: promptId, n: "n" } satisfies PermButtonValue),
           action_id: "perm_choice_n",
         },
       ],

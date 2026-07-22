@@ -70,15 +70,19 @@ export interface BlockedTerminalHandoff {
 }
 
 export class TurnEngine {
+  // Keyed by paneId — herdr's stable, restart-durable identity for a pane
+  // (see pairing.ts's Pairing.paneId doc). Not terminal_id: herdr 0.7.5+
+  // rejects terminal_id as an agent-command target, and paneId also survives
+  // the CLI inside the pane restarting, which terminal_id would not.
   private turns = new Map<string, TurnState>();
-  // Terminals busy for a reason other than an active turn (e.g. commands.ts
+  // Panes busy for a reason other than an active turn (e.g. commands.ts
   // running a /model or /plan TUI command) — kept separate from `turns` so
   // isBusy() covers both, and the BackgroundWatcher doesn't try to watch the
   // same instance a non-turn command is currently driving.
   private externallyBusy = new Set<string>();
-  // Terminals in the middle of startTurn()'s async setup, before a TurnState
+  // Panes in the middle of startTurn()'s async setup, before a TurnState
   // exists in `turns` yet — closes the race where two concurrent calls for
-  // the same terminal could both pass the busy check.
+  // the same pane could both pass the busy check.
   private reserving = new Set<string>();
 
   constructor(
@@ -87,38 +91,38 @@ export class TurnEngine {
     private readonly opts: TurnEngineOptions,
   ) {}
 
-  isBusy(terminalId: string): boolean {
-    return this.turns.has(terminalId) || this.externallyBusy.has(terminalId) || this.reserving.has(terminalId);
+  isBusy(paneId: string): boolean {
+    return this.turns.has(paneId) || this.externallyBusy.has(paneId) || this.reserving.has(paneId);
   }
 
-  markBusy(terminalId: string): void {
-    this.externallyBusy.add(terminalId);
+  markBusy(paneId: string): void {
+    this.externallyBusy.add(paneId);
   }
 
-  clearBusy(terminalId: string): void {
-    this.externallyBusy.delete(terminalId);
+  clearBusy(paneId: string): void {
+    this.externallyBusy.delete(paneId);
   }
 
-  async abortTurn(terminalId: string): Promise<void> {
-    const state = this.turns.get(terminalId);
+  async abortTurn(paneId: string): Promise<void> {
+    const state = this.turns.get(paneId);
     if (!state) return;
     state.abort.abort();
-    this.turns.delete(terminalId);
+    this.turns.delete(paneId);
   }
 
   async startTurn(pairing: Pairing, requesterUserId: string, text: string): Promise<void> {
-    const terminalId = pairing.terminalId;
+    const paneId = pairing.paneId;
     // Reserve the slot synchronously, before any `await` — otherwise two
-    // concurrent calls for the same terminal (e.g. a duplicate Slack event)
+    // concurrent calls for the same pane (e.g. a duplicate Slack event)
     // can both pass the busy check before either inserts into `turns`,
     // leaving one turn's state silently overwritten and untracked.
-    if (this.isBusy(terminalId)) {
+    if (this.isBusy(paneId)) {
       throw new Error("busy");
     }
-    this.reserving.add(terminalId);
+    this.reserving.add(paneId);
 
     try {
-      const agent = await this.herdr.agentGet(terminalId);
+      const agent = await this.herdr.agentGet(paneId);
       if (!agent) {
         throw new Error("agent-not-found");
       }
@@ -147,7 +151,7 @@ export class TurnEngine {
         abort: new AbortController(),
         currentPromptId: 0,
       };
-      this.turns.set(terminalId, state);
+      this.turns.set(paneId, state);
 
       const normalized = text
         .replace(/<@[^>|]+(\|[^>]+)?>/g, "")
@@ -156,23 +160,23 @@ export class TurnEngine {
         .trim();
 
       try {
-        await this.herdr.agentSend(terminalId, normalized);
+        await this.herdr.agentSend(paneId, normalized);
         await sleep(300);
         await this.herdr.paneSendKeys(agent.paneId, "Enter");
       } catch (err) {
         // Input injection failed after the state was already registered —
         // roll it back so the terminal doesn't stay stuck "busy" forever.
-        this.turns.delete(terminalId);
+        this.turns.delete(paneId);
         await statusHandle.update("❌ 開始に失敗しました").catch(() => {});
         throw err;
       }
 
-      void this.pollLoop(terminalId).catch((err) => {
-        console.error(`[turn ${terminalId}] poll loop crashed:`, err);
-        this.turns.delete(terminalId);
+      void this.pollLoop(paneId).catch((err) => {
+        console.error(`[turn ${paneId}] poll loop crashed:`, err);
+        this.turns.delete(paneId);
       });
     } finally {
-      this.reserving.delete(terminalId);
+      this.reserving.delete(paneId);
     }
   }
 
@@ -187,12 +191,12 @@ export class TurnEngine {
    * the terminal is already sitting at the prompt.
    */
   async adoptBlockedTerminal(pairing: Pairing, handoff: BlockedTerminalHandoff): Promise<void> {
-    const terminalId = pairing.terminalId;
+    const paneId = pairing.paneId;
     // Same reservation as startTurn() — a Slack-initiated turn could start
-    // for this terminal in the window between the watcher's isBusy() check
+    // for this pane in the window between the watcher's isBusy() check
     // and this method actually registering a TurnState.
-    if (this.isBusy(terminalId)) return;
-    this.reserving.add(terminalId);
+    if (this.isBusy(paneId)) return;
+    this.reserving.add(paneId);
 
     try {
       const statusHandle = await this.notifier.postMessage(
@@ -218,26 +222,26 @@ export class TurnEngine {
         abort: new AbortController(),
         currentPromptId: 0,
       };
-      this.turns.set(terminalId, state);
+      this.turns.set(paneId, state);
 
-      void this.pollLoop(terminalId).catch((err) => {
-        console.error(`[turn ${terminalId}] poll loop crashed:`, err);
-        this.turns.delete(terminalId);
+      void this.pollLoop(paneId).catch((err) => {
+        console.error(`[turn ${paneId}] poll loop crashed:`, err);
+        this.turns.delete(paneId);
       });
     } finally {
-      this.reserving.delete(terminalId);
+      this.reserving.delete(paneId);
     }
   }
 
-  async answerQuestionButton(terminalId: string, promptId: number, optionIndex: number): Promise<AnswerResult> {
-    const state = this.turns.get(terminalId);
+  async answerQuestionButton(paneId: string, promptId: number, optionIndex: number): Promise<AnswerResult> {
+    const state = this.turns.get(paneId);
     if (!state || state.phase !== "awaiting-question" || state.currentPromptId !== promptId || !state.pendingQuestionInfo) {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
     const label = info.options[optionIndex]?.label ?? String(optionIndex + 1);
 
-    await state.driver.answerOption(this.herdr, terminalId, state.paneId, String(optionIndex + 1));
+    await state.driver.answerOption(this.herdr, state.paneId, String(optionIndex + 1));
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, label), []).catch(() => {});
     state.promptHandle = undefined;
     state.pendingQuestionInfo = undefined;
@@ -245,15 +249,15 @@ export class TurnEngine {
     return { ok: true };
   }
 
-  async answerQuestionFreeText(terminalId: string, freeText: string): Promise<AnswerResult> {
-    const state = this.turns.get(terminalId);
+  async answerQuestionFreeText(paneId: string, freeText: string): Promise<AnswerResult> {
+    const state = this.turns.get(paneId);
     if (!state || state.phase !== "awaiting-question" || !state.pendingQuestionInfo) {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
     if (!state.driver.answerQuestionFreeText) return { ok: false, reason: "not-pending" };
 
-    await state.driver.answerQuestionFreeText(this.herdr, terminalId, state.paneId, info, freeText);
+    await state.driver.answerQuestionFreeText(this.herdr, state.paneId, info, freeText);
 
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, freeText), []).catch(() => {});
     state.promptHandle = undefined;
@@ -262,12 +266,12 @@ export class TurnEngine {
     return { ok: true };
   }
 
-  async answerPermissionButton(terminalId: string, promptId: number, num: string): Promise<AnswerResult> {
-    const state = this.turns.get(terminalId);
+  async answerPermissionButton(paneId: string, promptId: number, num: string): Promise<AnswerResult> {
+    const state = this.turns.get(paneId);
     if (!state || state.phase !== "awaiting-permission" || state.currentPromptId !== promptId) {
       return { ok: false, reason: "not-pending" };
     }
-    await state.driver.answerOption(this.herdr, terminalId, state.paneId, num);
+    await state.driver.answerOption(this.herdr, state.paneId, num);
     await state.promptHandle?.update(`→ ${num} を送信しました`, []).catch(() => {});
     state.promptHandle = undefined;
     state.planFeedbackOptionNum = undefined;
@@ -283,13 +287,13 @@ export class TurnEngine {
    * refines the plan and stays in plan mode). Only valid while the current
    * awaiting-permission prompt actually offered that option.
    */
-  async answerPlanFeedback(terminalId: string, freeText: string): Promise<AnswerResult> {
-    const state = this.turns.get(terminalId);
+  async answerPlanFeedback(paneId: string, freeText: string): Promise<AnswerResult> {
+    const state = this.turns.get(paneId);
     if (!state || state.phase !== "awaiting-permission" || state.planFeedbackOptionNum === undefined) {
       return { ok: false, reason: "not-pending" };
     }
     if (!state.driver.answerPlanFeedback) return { ok: false, reason: "not-pending" };
-    await state.driver.answerPlanFeedback(this.herdr, terminalId, state.paneId, state.planFeedbackOptionNum, freeText);
+    await state.driver.answerPlanFeedback(this.herdr, state.paneId, state.planFeedbackOptionNum, freeText);
 
     await state.promptHandle?.update(`→ 修正を依頼しました: ${freeText}`, []).catch(() => {});
     state.promptHandle = undefined;
@@ -298,23 +302,23 @@ export class TurnEngine {
     return { ok: true };
   }
 
-  private async pollLoop(terminalId: string): Promise<void> {
-    const state = this.turns.get(terminalId);
+  private async pollLoop(paneId: string): Promise<void> {
+    const state = this.turns.get(paneId);
     if (!state) return;
 
     while (!state.abort.signal.aborted) {
       const interval = state.phase === "running" ? this.opts.pollIntervalMs : Math.max(this.opts.pollIntervalMs, 5_000);
       await sleep(interval);
       // Re-check: this loop's turn may have been aborted (and a new one
-      // started for the same terminal) while we were asleep. finalize()
-      // looks up state by terminalId, not by this closure's object identity,
+      // started for the same pane) while we were asleep. finalize()
+      // looks up state by paneId, not by this closure's object identity,
       // so a stale loop reaching it after abort could delete/finalize a
       // different, newly-started turn.
       if (state.abort.signal.aborted) return;
 
-      const agent = await this.herdr.agentGet(terminalId).catch(() => null);
+      const agent = await this.herdr.agentGet(paneId).catch(() => null);
       if (!agent) {
-        await this.finalize(terminalId, "⚠️ インスタンスが終了しました（部分的な出力のみ）");
+        await this.finalize(paneId, "⚠️ インスタンスが終了しました（部分的な出力のみ）");
         return;
       }
 
@@ -350,7 +354,7 @@ export class TurnEngine {
       // button) would keep the terminal "busy" forever, since blocked never
       // reaches the timeout check further down.
       if (Date.now() - state.startedAt > this.opts.turnTimeoutMs) {
-        await this.finalize(terminalId, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
+        await this.finalize(paneId, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
         return;
       }
 
@@ -369,7 +373,7 @@ export class TurnEngine {
               state.pairing.channel,
               state.pairing.threadTs ?? "",
               `❓ ${aq.header}: ${aq.question}`,
-              askUserQuestionBlocks(terminalId, state.currentPromptId, aq),
+              askUserQuestionBlocks(paneId, state.currentPromptId, aq),
             );
             state.phase = "awaiting-question";
           } else {
@@ -378,7 +382,7 @@ export class TurnEngine {
 
             if (isPlanPrompt && this.notifier.uploadTextFile) {
               await this.attachPlanFile(state, paneText).catch((err) =>
-                console.error(`[turn ${terminalId}] plan file attach failed:`, err),
+                console.error(`[turn ${paneId}] plan file attach failed:`, err),
               );
             }
 
@@ -400,8 +404,8 @@ export class TurnEngine {
               state.pairing.threadTs ?? "",
               header,
               buttonMenu
-                ? permissionBlocks(terminalId, state.currentPromptId, buttonMenu, isPlanPrompt ? header : undefined)
-                : permissionParseFailureBlocks(terminalId, state.currentPromptId, paneText),
+                ? permissionBlocks(paneId, state.currentPromptId, buttonMenu, isPlanPrompt ? header : undefined)
+                : permissionParseFailureBlocks(paneId, state.currentPromptId, paneText),
             );
             state.phase = "awaiting-permission";
           }
@@ -424,16 +428,16 @@ export class TurnEngine {
       }
 
       if (agent.agentStatus === "idle" || agent.agentStatus === "done") {
-        await this.finalize(terminalId);
+        await this.finalize(paneId);
         return;
       }
     }
   }
 
-  private async finalize(terminalId: string, warning?: string): Promise<void> {
-    const state = this.turns.get(terminalId);
+  private async finalize(paneId: string, warning?: string): Promise<void> {
+    const state = this.turns.get(paneId);
     if (!state) return;
-    this.turns.delete(terminalId);
+    this.turns.delete(paneId);
 
     const elapsed = Math.round((Date.now() - state.startedAt) / 1000);
     const text = state.collected.join("\n\n").trim();

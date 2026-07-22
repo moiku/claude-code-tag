@@ -60,12 +60,19 @@ export interface PairSelectContext {
   channel: string;
   threadTs: string;
   userId: string;
+  // Actually a paneId (agentPickerBlocks embeds a.paneId as the button
+  // value) — kept named terminalId on the wire so a Hub deployed from an
+  // older build (Hub–Spoke mode: Hub and Spoke ship independently) still
+  // round-trips the value under the field name it knows.
   terminalId: string;
 }
 
 export interface AskUserQuestionButtonContext {
   channel: string;
   threadTs: string;
+  // Despite the name, this is the paneId round-tripped through the Slack
+  // button's embedded value (see turn.ts's askUserQuestionBlocks call and
+  // slack/app.ts's `value.t` decode) — TurnEngine keys its turns by paneId.
   terminalId: string;
   promptId: number;
   optionIndex: number;
@@ -74,6 +81,7 @@ export interface AskUserQuestionButtonContext {
 export interface PermissionButtonContext {
   channel: string;
   threadTs: string;
+  // See AskUserQuestionButtonContext.terminalId — same paneId-via-`t` round trip.
   terminalId: string;
   promptId: number;
   num: string;
@@ -123,22 +131,22 @@ export class CommandHandler {
         );
         return;
       }
-      if (this.turnEngine.isBusy(pairing.terminalId)) {
+      if (this.turnEngine.isBusy(pairing.paneId)) {
         await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
         return;
       }
-      const agent = await this.herdr.agentGet(pairing.terminalId);
+      const agent = await this.herdr.agentGet(pairing.paneId);
       if (!agent) {
         await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
         return;
       }
       const driver = driverFor(agent.agent);
-      this.turnEngine.markBusy(pairing.terminalId);
+      this.turnEngine.markBusy(pairing.paneId);
       try {
         const reply = await driver.runModelCommand(this.herdr, agent, modelMatch[1].trim());
         await this.notifier.postReply(channel, threadTs, reply);
       } finally {
-        this.turnEngine.clearBusy(pairing.terminalId);
+        this.turnEngine.clearBusy(pairing.paneId);
       }
       return;
     }
@@ -154,7 +162,7 @@ export class CommandHandler {
         );
         return;
       }
-      const agent = await this.herdr.agentGet(pairing.terminalId);
+      const agent = await this.herdr.agentGet(pairing.paneId);
       if (!agent) {
         await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
         return;
@@ -173,7 +181,7 @@ export class CommandHandler {
         );
         return;
       }
-      await this.runModeCommand(channel, threadTs, pairing.terminalId, driver, target);
+      await this.runModeCommand(channel, threadTs, pairing.paneId, driver, target);
       return;
     }
 
@@ -194,7 +202,7 @@ export class CommandHandler {
           );
           return;
         }
-        const agent = await this.herdr.agentGet(pairing.terminalId);
+        const agent = await this.herdr.agentGet(pairing.paneId);
         if (!agent) {
           await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
           return;
@@ -207,7 +215,7 @@ export class CommandHandler {
         // `plan` is just `mode plan` — cycle to plan mode via Shift+Tab
         // rather than the `/plan` slash command, so all four modes share
         // one reliable mechanism.
-        await this.runModeCommand(channel, threadTs, pairing.terminalId, driver, "plan");
+        await this.runModeCommand(channel, threadTs, pairing.paneId, driver, "plan");
         return;
       }
       case "connect": {
@@ -229,7 +237,7 @@ export class CommandHandler {
           await this.notifier.postReply(channel, threadTs, "このスレッドは接続されていません。");
           return;
         }
-        await this.turnEngine.abortTurn(pairing.terminalId);
+        await this.turnEngine.abortTurn(pairing.paneId);
         this.pairingStore.remove(pairing.key);
         await this.notifier.postReply(channel, threadTs, "🔌 接続を解除しました。");
         return;
@@ -240,7 +248,7 @@ export class CommandHandler {
           await this.notifier.postReply(channel, threadTs, "このスレッドは接続されていません。");
           return;
         }
-        const agent = await this.herdr.agentGet(pairing.terminalId);
+        const agent = await this.herdr.agentGet(pairing.paneId);
         const statusLine = agent
           ? `状態: ${agent.agentStatus} / cwd: ${agent.cwd}`
           : "⚠️ インスタンスが見つかりません（切断されている可能性があります）";
@@ -251,7 +259,7 @@ export class CommandHandler {
         const agents = await this.herdr.agentList();
         const pairings = this.pairingStore.list();
         const lines = agents.map((a) => {
-          const paired = pairings.find((p) => p.terminalId === a.terminalId);
+          const paired = pairings.find((p) => p.paneId === a.paneId);
           const mark = paired ? "🔗" : "・";
           return `${mark} ${a.agentStatus.padEnd(8)} ${a.cwd}`;
         });
@@ -268,7 +276,7 @@ export class CommandHandler {
           const pairing = this.pairingStore.get(channel, threadTs);
           let driver: AgentDriver | null = null;
           if (pairing) {
-            const agent = await this.herdr.agentGet(pairing.terminalId).catch(() => null);
+            const agent = await this.herdr.agentGet(pairing.paneId).catch(() => null);
             driver = agent ? driverFor(agent.agent) : null;
           }
           await this.notifier.postReply(channel, threadTs, helpTextFor(driver));
@@ -288,7 +296,7 @@ export class CommandHandler {
       );
       return;
     }
-    if (this.turnEngine.isBusy(pairing.terminalId)) {
+    if (this.turnEngine.isBusy(pairing.paneId)) {
       await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
       return;
     }
@@ -316,23 +324,23 @@ export class CommandHandler {
   private async runModeCommand(
     channel: string,
     threadTs: string,
-    terminalId: string,
+    paneId: string,
     driver: AgentDriver,
     target: string,
   ): Promise<void> {
     const modes = driver.modes;
     if (!modes) return; // callers gate on this; defensive no-op if reached anyway
-    if (this.turnEngine.isBusy(terminalId)) {
+    if (this.turnEngine.isBusy(paneId)) {
       await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
       return;
     }
-    const agent = await this.herdr.agentGet(terminalId);
+    const agent = await this.herdr.agentGet(paneId);
     if (!agent) {
       await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
       return;
     }
 
-    this.turnEngine.markBusy(terminalId);
+    this.turnEngine.markBusy(paneId);
     try {
       let current = modes.parseCurrent(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
       if (current === null) {
@@ -366,7 +374,7 @@ export class CommandHandler {
         );
       }
     } finally {
-      this.turnEngine.clearBusy(terminalId);
+      this.turnEngine.clearBusy(paneId);
     }
   }
 
@@ -387,7 +395,7 @@ export class CommandHandler {
       );
       return;
     }
-    if (this.turnEngine.isBusy(pairing.terminalId)) {
+    if (this.turnEngine.isBusy(pairing.paneId)) {
       await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
       return;
     }
@@ -428,26 +436,26 @@ export class CommandHandler {
   }
 
   async handlePairSelect(ctx: PairSelectContext): Promise<void> {
-    const { channel, threadTs, userId, terminalId } = ctx;
+    const { channel, threadTs, userId, terminalId: paneId } = ctx;
     if (!this.isOwner(userId)) {
       await this.notifier.postReply(channel, threadTs, "⚠️ オーナーのみ接続できます。");
       return;
     }
 
-    const agent = await this.herdr.agentGet(terminalId);
+    const agent = await this.herdr.agentGet(paneId);
     if (!agent) {
       await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
       return;
     }
 
-    const existing = this.pairingStore.byTerminal(terminalId);
+    const existing = this.pairingStore.byPane(paneId);
     if (existing) {
-      // The old pairing might be a zombie: its terminalId can still exist
-      // in herdr (e.g. Claude Code was exited and a new session started in
-      // the same pane) even though the conversation it was paired to is
-      // long gone. Only block on a *live* conflict with someone else's
-      // pairing — a stale entry, or the same owner re-picking a terminal
-      // they already had paired, gets moved automatically instead.
+      // The old pairing might be a zombie: its paneId can still exist in
+      // herdr (e.g. Claude Code was exited and a new session started in the
+      // same pane) even though the conversation it was paired to is long
+      // gone. Only block on a *live* conflict with someone else's pairing —
+      // a stale entry, or the same owner re-picking a pane they already had
+      // paired, gets moved automatically instead.
       if (existing.pairedBy === userId) {
         this.pairingStore.remove(existing.key);
         if (existing.key !== PairingStore.threadKey(channel, threadTs)) {
@@ -472,7 +480,8 @@ export class CommandHandler {
       key: PairingStore.threadKey(channel, threadTs),
       channel,
       threadTs,
-      terminalId,
+      paneId,
+      terminalId: agent.terminalId,
       cwd: agent.cwd,
       agent: agent.agent,
       pairedBy: userId,
@@ -507,9 +516,9 @@ export class CommandHandler {
   async handleFreeTextMessage(ctx: FreeTextContext): Promise<void> {
     const pairing = this.pairingStore.get(ctx.channel, ctx.threadTs);
     if (!pairing) return;
-    const asQuestion = await this.turnEngine.answerQuestionFreeText(pairing.terminalId, ctx.text);
+    const asQuestion = await this.turnEngine.answerQuestionFreeText(pairing.paneId, ctx.text);
     if (asQuestion.ok) return;
-    await this.turnEngine.answerPlanFeedback(pairing.terminalId, ctx.text);
+    await this.turnEngine.answerPlanFeedback(pairing.paneId, ctx.text);
   }
 }
 

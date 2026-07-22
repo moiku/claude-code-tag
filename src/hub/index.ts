@@ -249,6 +249,7 @@ async function runServer(): Promise<void> {
     };
     const channel = actionBody.channel?.id;
     const threadTs = actionBody.message?.thread_ts ?? actionBody.message?.ts;
+    // Actually a paneId — see PairSelectContext.terminalId's doc comment.
     const terminalId = actionBody.actions[0]?.selected_option?.value;
     if (!channel || !threadTs || !terminalId) return;
     const spoke = spokeFor(actionBody.user.id);

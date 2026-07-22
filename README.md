@@ -15,12 +15,12 @@ Slack to a cloud session — except cctag drives *your own terminal*.
 Slack thread (@cctag)
    ⇅ Socket Mode (@slack/bolt) — no public server required
 cctag daemon (Node/TS, runs on your machine)
-   ├─ inject:  herdr agent send <terminal_id> <text> + Enter
-   ├─ detect:  herdr agent get  <terminal_id>  (idle / working / blocked / done)
+   ├─ inject:  herdr pane send-text <pane_id> <text> + Enter
+   ├─ detect:  herdr agent get      <pane_id>  (idle / working / blocked / done)
    ├─ read:    the paired agent's own session transcript
    │             Claude Code: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
    │             Codex CLI:   ~/.codex/sessions/YYYY/MM/DD/rollout-*-<session-id>.jsonl
-   └─ pairing: thread (channel, thread_ts) ⇔ herdr terminal_id
+   └─ pairing: thread (channel, thread_ts) ⇔ herdr pane_id
 ```
 
 cctag controls the paired agent through [herdr](https://herdr.dev) (a terminal
@@ -367,6 +367,52 @@ operator to double-check:
   shows your name
 
 If it's not listed there, ask them to re-issue it.
+
+### Troubleshooting: `protocol_mismatch` / "インスタンスが見つかりません" after a herdr update
+
+If cctag suddenly can't reach any paired session — the Spoke log fills with
+
+```
+{"code":"protocol_mismatch","message":"client protocol N is newer than server protocol M; restart the Herdr server ..."}
+```
+
+or every Slack command replies **⚠️ インスタンスが見つかりません** — your local
+herdr almost certainly auto-updated underneath a still-running herdr server.
+This is a herdr-side issue, not a pairing you need to redo. Fix it in two steps:
+
+**1. Restart the herdr server so client and server run the same version.**
+The `herdr` CLI (client) is the freshly-installed binary, but the background
+`herdr server` process is still the old one, so they disagree on the wire
+protocol. Restarting the server exits pane processes, so save work first:
+
+```bash
+herdr server stop      # this closes running panes — expected
+herdr                  # starts a fresh server on the new version
+```
+
+Then re-register your Claude Code / Codex agents (`herdr agent start ...`, see
+[Installing herdr](#installing-herdr-macos-notes)) and re-run `@cctag connect`
+in each thread.
+
+**2. Update cctag if it's from before the herdr 0.7.5 change.**
+herdr 0.7.5 (2026-07-21) stopped accepting a `terminal_id` as an agent-command
+target — only a pane id resolves now — and removed `herdr agent send`
+(`agent send-keys` only takes key *names*, not free text). cctag builds from
+before this addressed agents by `terminal_id` and injected text with
+`agent send`, so on herdr ≥ 0.7.5 every command fails even after a clean server
+restart. Update to the current cctag, which addresses panes by `pane_id` and
+injects text via `pane send-text`:
+
+```bash
+git fetch origin && git reset --hard origin/main   # NOT `git pull` — main history was rewritten once
+npm install && npm run build
+# then restart your Spoke (launchctl kickstart -k gui/$(id -u)/<your-spoke-label>,
+# or just re-run npm run start:spoke)
+```
+
+The Hub↔Spoke wire protocol is unchanged across this fix, so a new Spoke and an
+old Spoke both work against the same Hub — you can update at your own pace, and
+the Hub itself does not need redeploying for this.
 
 ## Usage
 
