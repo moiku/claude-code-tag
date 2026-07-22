@@ -104,6 +104,26 @@ export class HerdrClient {
     await this.runRaw(["pane", "send-text", paneId, text]);
   }
 
+  /**
+   * Submits a prompt atomically — text injection *and* the Enter that submits
+   * it, done server-side in one operation (herdr 0.7.5+ `agent prompt`).
+   *
+   * Prefer this over agentSend()+paneSendKeys("Enter") for the common
+   * "type a message and send it" path: those are two separate herdr calls
+   * bridged by a fixed sleep, and Claude Code's TUI coalesces the injected
+   * text as a paste — if the Enter arrives before that paste settles it gets
+   * absorbed as a newline instead of submitting (the text sits unsent in the
+   * box until the next send flushes it). `agent prompt` sequences the two
+   * itself, honoring live bracketed-paste mode before the Enter, so there's
+   * no client-side race and no sleep to guess.
+   *
+   * Fire-and-forget (no --wait): submits and returns immediately, leaving
+   * TurnEngine's own poll loop to track the turn as before.
+   */
+  async agentPrompt(paneId: string, text: string): Promise<void> {
+    await this.run(["agent", "prompt", paneId, text]);
+  }
+
   /** `pane send-keys` prints nothing on success (unlike other subcommands) — don't JSON-parse it. */
   async paneSendKeys(paneId: string, ...keys: string[]): Promise<void> {
     await this.runRaw(["pane", "send-keys", paneId, ...keys]);

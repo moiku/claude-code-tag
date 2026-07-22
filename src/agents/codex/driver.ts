@@ -109,9 +109,9 @@ export const codexDriver: AgentDriver = {
       return "⚠️ モデル名を指定してください。";
     }
 
-    await herdr.agentSend(agent.paneId, "/model");
-    await sleep(300);
-    await herdr.paneSendKeys(agent.paneId, "Enter");
+    // Atomic submit (see TurnEngine.startTurn) — avoids the send-text/Enter
+    // paste race that can leave "/model" sitting unsent in the composer.
+    await herdr.agentPrompt(agent.paneId, "/model");
     await sleep(600);
 
     const stage1Text = await herdr.paneRead(agent.paneId, { source: "visible", lines: 30 });

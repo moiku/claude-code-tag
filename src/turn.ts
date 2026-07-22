@@ -160,9 +160,13 @@ export class TurnEngine {
         .trim();
 
       try {
-        await this.herdr.agentSend(paneId, normalized);
-        await sleep(300);
-        await this.herdr.paneSendKeys(agent.paneId, "Enter");
+        // Atomic submit (text + Enter, server-side) — NOT send-text then a
+        // separate Enter. The two-call version raced Claude Code's paste
+        // coalescing: an Enter arriving before the injected text settled got
+        // absorbed as a newline, leaving the message unsent in the box until
+        // the next turn flushed it (observed intermittently, esp. on heavier
+        // sessions). agent prompt sequences both itself, so there's no race.
+        await this.herdr.agentPrompt(paneId, normalized);
       } catch (err) {
         // Input injection failed after the state was already registered —
         // roll it back so the terminal doesn't stay stuck "busy" forever.

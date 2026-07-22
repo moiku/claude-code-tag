@@ -31,9 +31,10 @@ async function runClaudeSlashCommand(
   agent: { paneId: string },
   command: string,
 ): Promise<string> {
-  await herdr.agentSend(agent.paneId, command);
-  await sleep(300);
-  await herdr.paneSendKeys(agent.paneId, "Enter");
+  // Atomic submit — same reason as TurnEngine.startTurn: a separate
+  // send-text + Enter races Claude Code's paste coalescing and can leave the
+  // command unsent. agent prompt sequences text + Enter server-side.
+  await herdr.agentPrompt(agent.paneId, command);
 
   let settled = false;
   for (let i = 0; i < 10 && !settled; i++) {
