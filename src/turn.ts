@@ -164,9 +164,24 @@ export class TurnEngine {
         // separate Enter. The two-call version raced Claude Code's paste
         // coalescing: an Enter arriving before the injected text settled got
         // absorbed as a newline, leaving the message unsent in the box until
-        // the next turn flushed it (observed intermittently, esp. on heavier
-        // sessions). agent prompt sequences both itself, so there's no race.
+        // the next turn flushed it. agent prompt sequences both itself... but
+        // herdr 0.7.5 has been observed reporting agent.prompt as `ok` in ~2ms
+        // while the pane stays idle and nothing actually lands (confirmed via
+        // herdr's own server log against a real failure) — a herdr-internal
+        // timing issue this call can't detect on its own. Guard against it: if
+        // the pane is still idle after one poll interval, resend a bare Enter.
+        // Harmless no-op if the box really is empty (nothing to submit); if
+        // our text is sitting there unsent, this flushes it without a retry
+        // loop mis-firing on a genuinely-instant reply (those move to
+        // "working" at some point before settling, so the *resting* states —
+        // idle or done, same pair pollLoop's own finalize check treats as
+        // settled — are what "never even started" looks like here).
         await this.herdr.agentPrompt(paneId, normalized);
+        await sleep(this.opts.pollIntervalMs);
+        const recheck = await this.herdr.agentGet(paneId).catch(() => null);
+        if (recheck && (recheck.agentStatus === "idle" || recheck.agentStatus === "done")) {
+          await this.herdr.paneSendKeys(paneId, "Enter");
+        }
       } catch (err) {
         // Input injection failed after the state was already registered —
         // roll it back so the terminal doesn't stay stuck "busy" forever.
