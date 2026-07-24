@@ -122,15 +122,25 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
   });
 }
 
+// A connection that registered and then closed almost immediately (a bad
+// network path, a Hub-side hiccup, ...) isn't "success" — it's the failure
+// mode most likely to repeat. Only treat a connection as stable enough to
+// reset the backoff if it stayed up for a while; otherwise keep backing off
+// so a rapid connect/drop cycle can't hammer the Hub once per second forever.
+const STABLE_CONNECTION_MS = 10_000;
+
 async function main() {
   const config = loadSpokeConfig();
   console.log(`[spoke] connecting to ${config.hubUrl} as owner ${config.ownerUserId}...`);
 
   let backoffMs = 1_000;
   for (;;) {
+    const connectedAt = Date.now();
     try {
       await connectOnce(config);
-      backoffMs = 1_000;
+      if (Date.now() - connectedAt >= STABLE_CONNECTION_MS) {
+        backoffMs = 1_000;
+      }
     } catch (err) {
       console.error("[spoke] connection failed:", err instanceof Error ? err.message : err);
     }

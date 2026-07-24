@@ -68,7 +68,14 @@ async function runServer(): Promise<void> {
     });
   }
 
-  const httpServer = createServer();
+  // This server only ever expects a WebSocket upgrade on /spoke. Without a
+  // request handler, Node accepts a plain HTTP request (health checks, a
+  // browser hitting the bare domain, ...) but never responds — the client
+  // just hangs until its own timeout. Answer fast instead.
+  const httpServer = createServer((_req, res) => {
+    res.writeHead(404, { "content-type": "text/plain" }).end("cctag hub: websocket endpoint only\n");
+  });
+  httpServer.requestTimeout = 15_000;
   const wss = new WebSocketServer({ server: httpServer, path: "/spoke" });
 
   wss.on("connection", (ws, req) => {

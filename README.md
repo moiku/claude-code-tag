@@ -247,9 +247,18 @@ and give Caddy a one-line `/etc/caddy/Caddyfile`:
 
 ```
 your.domain.example {
-	reverse_proxy localhost:8765
+	reverse_proxy localhost:8765 {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 15s
+		}
+	}
 }
 ```
+
+The explicit transport timeouts matter on a resource-constrained free-tier VM:
+without them, a stalled Hub process (or a stalled TLS handshake under memory
+pressure) leaves the client hanging indefinitely instead of failing fast.
 
 Run the Hub under systemd (`ExecStart=/usr/bin/node dist/hub/index.js`,
 `EnvironmentFile=/opt/cctag/.env`) so it survives reboots — see

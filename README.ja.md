@@ -218,9 +218,18 @@ CaddyがACME/TLSハンドシェイクを完了できない）、Caddyに1行の`
 
 ```
 your.domain.example {
-	reverse_proxy localhost:8765
+	reverse_proxy localhost:8765 {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 15s
+		}
+	}
 }
 ```
+
+このタイムアウト明示設定は、資源が限られた無料枠VMでは重要になる。設定がないと、
+Hubプロセスが詰まった場合（あるいはメモリ逼迫下でTLSハンドシェイクが詰まった場合）に、
+クライアント側は速やかに失敗する代わりに無期限にハングし続けることになる。
 
 再起動後も生き残るよう、systemd配下でHubを動かす（`ExecStart=/usr/bin/node dist/hub/index.js`、
 `EnvironmentFile=/opt/cctag/.env`）— テンプレートのunitファイルは`assets/cctag-hub.service`参照 —
